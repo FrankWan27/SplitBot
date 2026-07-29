@@ -79,10 +79,10 @@ totals, so the history is what tells you *what* a debt was for.
 | Option | Required | Meaning |
 |---|---|---|
 | `user` | no | Only entries involving this person |
-| `count` | no | How many to show, 1-25; defaults to 10 |
+| `count` | no | How many to show, 1-25; defaults to 5 |
 
 ```
-/history                  # last 10 entries in this server
+/history                  # last 5 entries in this server
 /history user:@bob        # everything bob was involved in
 /history count:25         # a longer stretch
 ```
@@ -226,7 +226,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 104 tests: money math, ledger invariants, and end-to-end command runs
+npm test     # 105 tests: money math, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

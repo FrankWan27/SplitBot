@@ -11,7 +11,7 @@ import type { BillEntry, LedgerEntry, Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
 
-const DEFAULT_COUNT = 10;
+const DEFAULT_COUNT = 5;
 const MAX_COUNT = 25;
 
 /**

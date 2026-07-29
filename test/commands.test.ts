@@ -806,6 +806,24 @@ test('e2e: count limits the listing and says older entries exist', async () => {
   store.close();
 });
 
+test('e2e: history shows five entries when no count is given', async () => {
+  const store = new Store(':memory:');
+  await seedBills(store, 8);
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Showing 1-5 · more older entries/, 'the default page is five');
+  assert.match(text, /entry 3/, 'the fifth-newest is included');
+  assert.doesNotMatch(text, /entry 2/, 'the sixth-newest is not');
+
+  // The picker text has to agree with the code, or the option is misdocumented.
+  const json = history.data.toJSON() as { options?: { name: string; description: string }[] };
+  const count = json.options?.find((o) => o.name === 'count');
+  assert.match(count!.description, /default 5/);
+  store.close();
+});
+
 test('e2e: an empty history says so instead of showing a blank embed', async () => {
   const store = new Store(':memory:');
   const run = makeInteraction({ caller: ALICE });

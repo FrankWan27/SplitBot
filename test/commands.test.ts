@@ -693,7 +693,7 @@ test('e2e: a bill with no description is labelled rather than left blank', async
   store.close();
 });
 
-test('e2e: a bill renders as amount, payer with headcount, borrowers, then subtext', async () => {
+test('e2e: a bill renders as amount, payer with headcount, borrowers, then provenance', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -707,10 +707,10 @@ test('e2e: a bill renders as amount, payer with headcount, borrowers, then subte
 
   // The whole entry, anchored, so a line landing in the wrong order fails: a
   // date heading, the amount, who paid and for how many, who borrowed what, and
-  // the provenance as subtext.
+  // the provenance in italics.
   assert.match(
     text,
-    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n-# <t:\d+:R> - Logged by <@100>$/m,
+    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n_<t:\d+:R> - Logged by <@100>_$/m,
   );
   store.close();
 });
@@ -802,7 +802,7 @@ test('e2e: a bill split with one other person reads "person", not "people"', asy
   store.close();
 });
 
-test('e2e: a payment renders as amount, who paid whom, then subtext', async () => {
+test('e2e: a payment renders as amount, who paid whom, then provenance', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -820,7 +820,7 @@ test('e2e: a payment renders as amount, who paid whom, then subtext', async () =
   // borrowed line, so asserting over the whole listing would prove nothing.
   const block = text.split('\n\n').find((b) => b.includes('paid <@100>'));
   assert.ok(block, `expected a payment block in:\n${text}`);
-  assert.match(block, / \*\*\$10\.00\*\*\n<@200> paid <@100>\.\n-# <t:\d+:R>$/);
+  assert.match(block, / \*\*\$10\.00\*\*\n<@200> paid <@100>\.\n_<t:\d+:R>_$/);
   assert.doesNotMatch(block, /Paid by .* for/, 'a payment has no headcount line');
   assert.doesNotMatch(block, /borrowed/, 'a payment has no borrowed line');
   store.close();
@@ -904,14 +904,14 @@ test('e2e: history names who logged a bill on another persons behalf', async () 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  // The payer and the person who logged it are different, and the subtext is
+  // The payer and the person who logged it are different, and the italic line is
   // where that distinction has to be visible.
   assert.match(text, /Paid by <@200> for 2 people\./);
-  assert.match(text, /-# <t:\d+:R> - Logged by <@300>$/m);
+  assert.match(text, /_<t:\d+:R> - Logged by <@300>_$/m);
   store.close();
 });
 
-test('e2e: the subtext names the logger even when they are the payer', async () => {
+test('e2e: the provenance line names the logger even when they are the payer', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -921,9 +921,9 @@ test('e2e: the subtext names the logger even when they are the payer', async () 
 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
-  // Unconditional, unlike the old format: as subtext it costs a glance, and
+  // Unconditional, unlike the old format: as an italic aside it costs a glance, and
   // omitting it would make its presence elsewhere read as an accusation.
-  assert.match(replyText(run.replies[0]!), /-# <t:\d+:R> - Logged by <@100>$/m);
+  assert.match(replyText(run.replies[0]!), /_<t:\d+:R> - Logged by <@100>_$/m);
   store.close();
 });
 

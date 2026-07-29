@@ -87,7 +87,7 @@ function describe(entry: LedgerEntry): string {
     return [
       ` **${formatCents(entry.cents)}**`,
       `<@${entry.fromId}> paid <@${entry.toId}>.`,
-      `-# ${when}`,
+      `_${when}_`,
     ].join('\n');
   }
 
@@ -100,9 +100,11 @@ function describe(entry: LedgerEntry): string {
     ...borrowedLines(entry),
   ];
 
-  // Subtext, so the provenance is available without competing with the amount.
+  // Italic, so the provenance reads as an aside rather than competing with the
+  // amount. `-#` subtext would be smaller still, but Discord only parses it in
+  // message content - inside an embed description it prints the `-#` literally.
   // Always shown: it is the audit trail, and at this size it costs a glance.
-  lines.push(`-# ${when} - Logged by <@${entry.createdBy}>`);
+  lines.push(`_${when} - Logged by <@${entry.createdBy}>_`);
   return lines.join('\n');
 }
 

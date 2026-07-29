@@ -121,25 +121,31 @@ totals, so the history is what tells you *what* a debt was for.
 
 Entries are grouped under a `MM/DD` date heading, and each one reads as the
 amount and what it was for, who paid and for how many, who borrowed what, then the
-time and who logged it as subtext:
+time and who logged it in italics:
 
 ```
 ## 07/27
  **$21.45 - Trader Joes**
 Paid by @franky for 3 people.
 _@mikula @pepega8359 borrowed $7.15._
--# 4 hours ago - Logged by @franky
+_4 hours ago - Logged by @franky_
 
  **$12.32 - Molly Tea**
 Paid by @franky for 3 people.
 _@mikula @pepega8359 borrowed $4.10._
--# 4 hours ago - Logged by @franky
+_4 hours ago - Logged by @franky_
 
 ## 07/26
  **$7.15**
 @mikula paid @franky.
--# yesterday
+_yesterday_
 ```
+
+The provenance line is italic rather than `-#` subtext, which would be smaller
+still: Discord only parses `-#` in message content, and inside an embed
+description it prints the `-#` literally. The one genuinely small line available
+here is the embed's own footer, which is a structural slot and so can appear once
+per embed, not once per entry.
 
 The heading appears once per day, not once per entry, so a busy day reads as one
 block. The year is added (`12/25/2025`) only on entries from a previous year,
@@ -187,7 +193,7 @@ one of the people it was split between, or either side of a payment. A bill you
 were merely charged for still shows up, which is usually the reason to look.
 
 Someone who only *typed* the command for other people is not counted as
-involved, but the subtext always names them, so a bill logged on someone else's
+involved, but the italic line always names them, so a bill logged on someone else's
 behalf is visible without having to compare it against who paid.
 
 **Backdated bills sort by when they happened**, not by when they were typed, so a

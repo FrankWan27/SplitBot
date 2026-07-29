@@ -25,13 +25,12 @@ export const data = guildOnly(
         .setDescription('Mention everyone splitting this, e.g. @alice @bob')
         .setRequired(true),
     )
-    // Required so the field always appears in the picker rather than being an
-    // optional box that is easy to tab past. A blank or whitespace-only value is
-    // accepted and stored as no description at all.
+    // Required: Discord will not accept a blank or whitespace-only value for a
+    // required option, so every bill logged through the picker has a real one.
     .addStringOption((o) =>
       o
         .setName('description')
-        .setDescription('What was it for? e.g. Pulled a guy from a blind box (space to skip)')
+        .setDescription('What was it for? e.g. Pulled a guy from a blind box')
         .setRequired(true),
     )
     .addUserOption((o) =>
@@ -53,9 +52,9 @@ export async function execute(
   const guild = requireGuild(interaction);
 
   const totalCents = parseAmountToCents(interaction.options.getString('amount', true));
-  // The option is required only so it always shows in the picker; an empty or
-  // whitespace-only value means "no description" and is stored as null, so
-  // /history shows its "no description" label rather than a blank line.
+  // Discord enforces a non-blank value on a required option, so this normally
+  // just trims. The null fallback stays because /history must render entries
+  // written before the option was required, and a blank line reads as a bug.
   const description = interaction.options.getString('description')?.trim() || null;
   const payerOption = interaction.options.getUser('payer');
   const includePayer = interaction.options.getBoolean('include_payer') ?? true;

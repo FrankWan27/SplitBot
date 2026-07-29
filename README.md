@@ -13,14 +13,17 @@ Log a bill and split it evenly.
 |---|---|---|
 | `amount` | yes | Total of the bill, e.g. `42.50`, `$42.50`, `1,234.56` |
 | `with` | yes | Mention everyone splitting it, e.g. `@alice @bob` |
-| `description` | yes* | What it was for, e.g. `dinner at Nopa`. *Required in the picker, but an empty value is accepted (see below). |
+| `description` | yes | What it was for, e.g. `dinner at Nopa` |
 | `payer` | no | Who actually paid; defaults to you |
 | `include_payer` | no | Whether the payer shares the cost; defaults to yes |
 
-The `description` field is marked required so it always shows up in the command
-picker instead of being an optional box that is easy to tab past. It still
-accepts an empty value: clear it or type a space and the bill records with no
-description, shown as `no description` in `/history`.
+`description` is required. Discord will not accept a blank or whitespace-only
+value for a required option, so every bill has a real one - which is the point,
+since `/balances` shows only totals and the description is what tells you later
+*what* a debt was for.
+
+Bills logged before the field was required have no description, and `/history`
+labels those `no description` rather than leaving a blank line.
 
 ```
 /bill amount:60 with:@bob @carol description:dinner
@@ -226,7 +229,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 105 tests: money math, ledger invariants, and end-to-end command runs
+npm test     # 104 tests: money math, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

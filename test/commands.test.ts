@@ -555,42 +555,34 @@ test('e2e: history lists newest first and includes payments', async () => {
   store.close();
 });
 
-test('e2e: a whitespace-only description is treated as no description', async () => {
-  const store = new Store(':memory:');
-  const b = makeInteraction({
-    caller: ALICE,
-    strings: { amount: '20', with: '<@200>', description: '   ' },
-  });
-  await bill.execute(b.interaction, store);
+test('e2e: a blank description never reaches the ledger as whitespace', async () => {
+  // Discord rejects a blank value for a required option, so these do not arrive
+  // in practice. Asserted anyway: a stored "   " would render as a bill with an
+  // empty description line, which reads as a bug rather than as missing data.
+  for (const [i, blank] of ['   ', '', '\t\n'].entries()) {
+    const store = new Store(':memory:');
+    const b = makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: blank },
+    });
+    await bill.execute(b.interaction, store);
 
-  // It must land as null, not "   ", so /history shows its label.
-  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!;
-  assert.equal(entry.kind, 'bill');
-  assert.equal(entry.kind === 'bill' ? entry.description : 'wrong kind', null);
+    const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!;
+    assert.equal(
+      entry.kind === 'bill' ? entry.description : 'wrong kind',
+      null,
+      `blank #${i} should store as null, not whitespace`,
+    );
+    assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000, 'the bill still posts');
 
-  const run = makeInteraction({ caller: ALICE });
-  await history.execute(run.interaction, store);
-  assert.match(replyText(run.replies[0]!), /no description/);
-  store.close();
+    const run = makeInteraction({ caller: ALICE });
+    await history.execute(run.interaction, store);
+    assert.match(replyText(run.replies[0]!), /no description/);
+    store.close();
+  }
 });
 
-test('e2e: an empty description satisfies the required field and stores as none', async () => {
-  // The whole point of making the option required: the user can hit space or
-  // clear it and still submit, and the bill records fine with no description.
-  const store = new Store(':memory:');
-  const b = makeInteraction({
-    caller: ALICE,
-    strings: { amount: '25', with: '<@200>', description: '' },
-  });
-  await bill.execute(b.interaction, store);
-
-  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!;
-  assert.equal(entry.kind === 'bill' ? entry.description : 'wrong kind', null);
-  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1250, 'the bill still posts');
-  store.close();
-});
-
-test('the description option is required so it always appears in the picker', () => {
+test('the description option is required, so Discord will not accept a blank one', () => {
   const json = bill.data.toJSON() as {
     options?: { name: string; required?: boolean }[];
   };
@@ -600,6 +592,8 @@ test('the description option is required so it always appears in the picker', ()
 });
 
 test('e2e: a bill with no description is labelled rather than left blank', async () => {
+  // Entries written before the option was required still have a null
+  // description, and /history has to render them without a blank line.
   const store = new Store(':memory:');
   const b = makeInteraction({ caller: ALICE, strings: { amount: '20', with: '<@200>' } });
   await bill.execute(b.interaction, store);

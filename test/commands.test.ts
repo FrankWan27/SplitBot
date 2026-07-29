@@ -710,7 +710,7 @@ test('e2e: a bill renders as amount, payer with headcount, borrowers, then prove
   // the time in italics. Alice both paid and logged it, so no "Logged by".
   assert.match(
     text,
-    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n_<t:\d+:R>_$/m,
+    /^## __\d\d\/\d\d__\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n<@200> <@300> borrowed \$3\.00\.\n_<t:\d+:R>_$/m,
   );
   store.close();
 });
@@ -744,7 +744,7 @@ test('e2e: an uneven split states each distinct share rather than one wrong figu
   // a single line, which would print an amount one of them does not owe.
   const rendered = new Map<string, number>();
   for (const line of text.split('\n')) {
-    const m = line.match(/^_(.+) borrowed \$(\d+\.\d\d)\._$/);
+    const m = line.match(/^(.+) borrowed \$(\d+\.\d\d)\.$/);
     if (!m) continue;
     const cents = Math.round(Number(m[2]) * 100);
     for (const id of m[1]!.match(/<@(\d+)>/g) ?? []) {
@@ -782,7 +782,7 @@ test('e2e: a bill the payer took no share of counts only the borrowers', async (
   // the per-person figure fail to divide the total.
   assert.match(
     replyText(run.replies[0]!),
-    /Paid by <@100> for 2 people\.\n_<@200> <@300> borrowed \$10\.00\._/,
+    /Paid by <@100> for 2 people\.\n<@200> <@300> borrowed \$10\.00\./,
   );
   store.close();
 });
@@ -953,9 +953,9 @@ test('e2e: entries on the same day share one heading', async () => {
   const text = replyText(run.replies[0]!);
 
   assert.equal((text.match(/^## /gm) ?? []).length, 1, `one heading, not three:\n${text}`);
-  assert.match(text, /^## 07\/27$/m);
+  assert.match(text, /^## __07\/27__$/m);
   // The heading opens the group, so every entry sits below it.
-  const heading = text.indexOf('## 07/27');
+  const heading = text.indexOf('## __07/27__');
   for (const d of ['first', 'second', 'third']) {
     assert.ok(text.indexOf(d) > heading, `${d} should sit under the heading`);
   }
@@ -988,7 +988,7 @@ test('e2e: each day gets its own heading, in the order the days are listed', asy
   const text = replyText(run.replies[0]!);
 
   assert.deepEqual(
-    (text.match(/^## .+$/gm) ?? []).map((h) => h.slice(3)),
+    (text.match(/^## __(.+)__$/gm) ?? []).map((h) => h.slice(5, -2)),
     ['07/27', '07/26', '07/25'],
     'headings follow the newest-first ordering of the entries',
   );
@@ -1015,7 +1015,7 @@ test('e2e: a backdated bill is grouped under the day it happened', async () => {
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /^## 07\/20$/m);
+  assert.match(text, /^## __07\/20__$/m);
   assert.doesNotMatch(text, /07\/28/, 'the day it was typed is not a heading');
   store.close();
 });
@@ -1042,7 +1042,11 @@ test('e2e: a heading is never left with no entries under it', async () => {
   const description = run.replies[0]!.embeds![0]!.data['description'] as string;
 
   assert.ok(description.length <= 4096, `over the embed limit at ${description.length}`);
-  assert.doesNotMatch(description, /## [\d/]+$/, 'a heading is never the last thing shown');
+  assert.doesNotMatch(
+    description,
+    /## __[\d/]+__$/,
+    'a heading is never the last thing shown',
+  );
   // Every heading has an amount line after it.
   const headings = description.match(/^## .+$/gm) ?? [];
   assert.ok(headings.length > 0);
@@ -1074,12 +1078,16 @@ test('e2e: a day split across a page boundary is headed on both pages', async ()
 
   const run = makeInteraction({ caller: ALICE, integers: { count: 2 } });
   await history.execute(run.interaction, store);
-  assert.match(replyText(run.replies[0]!), /^## 07\/27$/m);
+  assert.match(replyText(run.replies[0]!), /^## __07\/27__$/m);
 
   const older = makeButtonClick(buttonNamed(run.replies[0]!, 'Older').custom_id);
   await history.handleButton(older.interaction, store);
   const next = replyText(older.updates[0]!);
-  assert.match(next, /^## 07\/27$/m, 'the second page repeats the heading, not a bare list');
+  assert.match(
+    next,
+    /^## __07\/27__$/m,
+    'the second page repeats the heading, not a bare list',
+  );
   assert.match(next, /bill 2/, 'and it is the continuation of the same day');
   store.close();
 });
@@ -1108,7 +1116,7 @@ test('e2e: the date headings follow DISPLAY_TIMEZONE, not the server clock', asy
       else process.env['DISPLAY_TIMEZONE'] = zone;
       const run = makeInteraction({ caller: ALICE });
       await history.execute(run.interaction, store);
-      const found = replyText(run.replies[0]!).match(/^## (.+)$/m);
+      const found = replyText(run.replies[0]!).match(/^## __(.+)__$/m);
       assert.ok(found, 'every entry sits under a heading');
       return found[1]!;
     } finally {

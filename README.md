@@ -124,22 +124,27 @@ amount and what it was for, who paid and for how many, who borrowed what, then t
 time in italics:
 
 ```
-## 07/27
+## __07/27__
  **$21.45 - Trader Joes**
 Paid by @franky for 3 people.
-_@mikula @pepega8359 borrowed $7.15._
+@mikula @pepega8359 borrowed $7.15.
 _4 hours ago_
 
  **$12.32 - Molly Tea**
 Paid by @pepega8359 for 3 people.
-_@mikula @franky borrowed $4.10._
+@mikula @franky borrowed $4.10.
 _4 hours ago - Logged by @franky_
 
-## 07/26
+## __07/26__
  **$7.15**
 @mikula paid @franky.
 _yesterday_
 ```
+
+The date heading is underlined as well as headed, so it reads as a divider between
+days rather than as a title belonging to the entry directly beneath it. Italics are
+reserved for the time-and-logger line, which is the one thing on an entry that is
+an aside rather than part of the record.
 
 `Logged by` appears only when the person who typed the command is not the payer,
 as on the Molly Tea bill above. Usually they are the same person, where it would

@@ -74,7 +74,7 @@ function borrowedLines(entry: BillEntry): string[] {
     const shown = names.slice(0, MAX_NAMES);
     const hidden = names.length - shown.length;
     const who = `${shown.join(' ')}${hidden > 0 ? ` and ${hidden} more` : ''}`;
-    return `_${who} borrowed ${formatCents(shareCents)}._`;
+    return `${who} borrowed ${formatCents(shareCents)}.`;
   });
 }
 
@@ -207,7 +207,9 @@ function buildPage(
     const day = dayKey(iso, zone);
     // A heading opens a group; a null key means an unparseable timestamp, which
     // stays under whatever heading precedes it rather than inventing one.
-    const heading = day !== null && day !== lastDay ? `## ${dayHeading(iso, zone)}\n` : '';
+    // Underlined as well as headed, so the day reads as a divider between groups
+    // rather than as a title belonging to the entry directly beneath it.
+    const heading = day !== null && day !== lastDay ? `## __${dayHeading(iso, zone)}__\n` : '';
     if (day !== null) lastDay = day;
     blocks.push(heading + describe(entry));
   }

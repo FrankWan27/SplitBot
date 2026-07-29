@@ -740,8 +740,27 @@ test('e2e: history notes when someone logged a bill on another persons behalf', 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /paid by <@200>/);
-  assert.match(text, /logged by <@300>/);
+  // A fourth line of its own, after the split, rather than crowding the payer line.
+  assert.match(
+    text,
+    /\*\*\$10\.00\*\* - taxi\npaid by <@200> · <t:\d+:R>\nsplit with <@100>\nlogged by <@300>/,
+  );
+  store.close();
+});
+
+test('e2e: history has no logged-by line when the payer logged it themselves', async () => {
+  const store = new Store(':memory:');
+  const b = makeInteraction({
+    caller: ALICE,
+    strings: { amount: '10', with: '<@200>', description: 'taxi' },
+  });
+  await bill.execute(b.interaction, store);
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.doesNotMatch(text, /logged by/, 'the usual case stays three lines');
+  assert.match(text, /\*\*\$10\.00\*\* - taxi\npaid by <@100> · <t:\d+:R>\nsplit with <@200>$/m);
   store.close();
 });
 

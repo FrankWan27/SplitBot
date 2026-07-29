@@ -65,16 +65,16 @@ function describe(entry: LedgerEntry): string {
     return `**${formatCents(entry.cents)}**\n` + `<@${entry.fromId}> paid <@${entry.toId}>${suffix}`;
   }
 
-  // The `createdBy` note only appears when someone logged a bill on another
-  // person's behalf, since that is the case worth being able to audit later.
-  const loggedBy = entry.createdBy !== entry.payerId ? ` · logged by <@${entry.createdBy}>` : '';
-
   const lines = [
     `**${formatCents(entry.totalCents)}** - ${entry.description ?? '_no description_'}`,
-    `paid by <@${entry.payerId}>${suffix}${loggedBy}`,
+    `paid by <@${entry.payerId}>${suffix}`,
   ];
   const others = splitWith(entry);
   if (others) lines.push(others);
+
+  // Only worth a line when someone logged a bill on another person's behalf,
+  // which is the case worth being able to audit later.
+  if (entry.createdBy !== entry.payerId) lines.push(`logged by <@${entry.createdBy}>`);
 
   return lines.join('\n');
 }

@@ -99,6 +99,16 @@ $5.00
 @mikula paid @franky · 2 hours ago
 ```
 
+A fourth line appears only when someone logged a bill on another person's behalf,
+which is the case worth being able to audit later:
+
+```
+$24.00 - taxi
+paid by @mikula · 3 days ago
+split with @franky, @pepega8359
+logged by @franky
+```
+
 Individual shares are not listed. They are always the total divided by the number
 of participants, give or take the odd penny, so printing them adds length without
 adding information - `/balances` is where the amounts live.
@@ -128,7 +138,8 @@ one of the people it was split between, or either side of a payment. A bill you
 were merely charged for still shows up, which is usually the reason to look.
 
 Someone who only *typed* the command for other people is not counted as
-involved, but the listing notes who logged it when that differs from who paid.
+involved, but the listing notes who logged it on its own last line when that
+differs from who paid.
 
 ## Setup
 
@@ -215,7 +226,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 103 tests: money math, ledger invariants, and end-to-end command runs
+npm test     # 104 tests: money math, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

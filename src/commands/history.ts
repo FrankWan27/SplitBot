@@ -88,12 +88,15 @@ function borrowedLines(entry: BillEntry): string[] {
  * since. The logger is named only when it is not the payer - usually the two are
  * the same person and "Logged by" would restate the line above it, so mentioning
  * it only on the exception is what makes the exception visible at a glance.
+ *
+ * Each clause is capitalised, since the dashes make them separate labels rather
+ * than one sentence, and a mixture would read as a mistake.
  */
 function provenance(entry: LedgerEntry, payerId: string): string {
   const parts = [timestamp(entryWhen(entry))];
   if (entry.createdBy !== payerId) parts.push(`Logged by <@${entry.createdBy}>`);
-  if (entry.editedBy) parts.push(`edited by <@${entry.editedBy}>`);
-  if (entry.voidedBy) parts.push(`deleted by <@${entry.voidedBy}>`);
+  if (entry.editedBy) parts.push(`Edited by <@${entry.editedBy}>`);
+  if (entry.voidedBy) parts.push(`Deleted by <@${entry.voidedBy}>`);
   return `_${parts.join(' - ')}_`;
 }
 

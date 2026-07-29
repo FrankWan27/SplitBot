@@ -1456,7 +1456,7 @@ test('e2e: a deleted bill is hidden from history until show_deleted asks for it'
   // does not add up against /balances, so it has to announce itself.
   assert.match(shownText, /including deleted/);
   assert.match(shownText, /~~\*\*\$30\.00 - dinner\*\*~~/);
-  assert.match(shownText, /deleted by <@200>/, 'names who deleted it');
+  assert.match(shownText, /Deleted by <@200>/, 'names who deleted it');
   store.close();
 });
 
@@ -1715,7 +1715,7 @@ test('e2e: an edited entry says so in history, and names the editor', async () =
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /edited by <@300>/);
+  assert.match(text, /Edited by <@300>/);
   assert.match(text, /\$20\.00 - dinner/, 'the new amount is what is listed');
   assert.doesNotMatch(text, /\$10\.00 - dinner/);
   store.close();

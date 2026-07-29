@@ -159,6 +159,10 @@ days rather than as a title belonging to the entry directly beneath it. Italics 
 reserved for the time-and-logger line, which is the one thing on an entry that is
 an aside rather than part of the record.
 
+An edited or deleted entry says so on the same line, as `Edited by @name` and
+`Deleted by @name`. Each clause is capitalised, because the dashes separating them
+make them labels rather than one running sentence.
+
 `Logged by` appears only when the person who typed the command is not the payer,
 as on the Molly Tea bill above. Usually they are the same person, where it would
 just restate the line above it - showing it only on the exception is what makes
@@ -284,7 +288,7 @@ The row is kept rather than removed. It is marked deleted, hidden from `/history
 by default, and its effect on balances is reversed - so the ledger stays an
 append-only record of what happened, including the fact that somebody deleted
 something. `/history show_deleted:true` lists deleted entries struck through, with
-who deleted them.
+`Deleted by` naming who did it.
 
 Deleting something twice is refused and points at `/restore`, rather than reversing
 the same balances a second time.

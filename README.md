@@ -121,18 +121,18 @@ totals, so the history is what tells you *what* a debt was for.
 
 Entries are grouped under a `MM/DD` date heading, and each one reads as the
 amount and what it was for, who paid and for how many, who borrowed what, then the
-time and who logged it in italics:
+time in italics:
 
 ```
 ## 07/27
  **$21.45 - Trader Joes**
 Paid by @franky for 3 people.
 _@mikula @pepega8359 borrowed $7.15._
-_4 hours ago - Logged by @franky_
+_4 hours ago_
 
  **$12.32 - Molly Tea**
-Paid by @franky for 3 people.
-_@mikula @pepega8359 borrowed $4.10._
+Paid by @pepega8359 for 3 people.
+_@mikula @franky borrowed $4.10._
 _4 hours ago - Logged by @franky_
 
 ## 07/26
@@ -140,6 +140,11 @@ _4 hours ago - Logged by @franky_
 @mikula paid @franky.
 _yesterday_
 ```
+
+`Logged by` appears only when the person who typed the command is not the payer,
+as on the Molly Tea bill above. Usually they are the same person, where it would
+just restate the line above it - showing it only on the exception is what makes
+the exception noticeable.
 
 The provenance line is italic rather than `-#` subtext, which would be smaller
 still: Discord only parses `-#` in message content, and inside an embed
@@ -193,8 +198,8 @@ one of the people it was split between, or either side of a payment. A bill you
 were merely charged for still shows up, which is usually the reason to look.
 
 Someone who only *typed* the command for other people is not counted as
-involved, but the italic line always names them, so a bill logged on someone else's
-behalf is visible without having to compare it against who paid.
+involved, but `Logged by` names them, so a bill logged on someone else's behalf is
+visible without having to compare it against who paid.
 
 **Backdated bills sort by when they happened**, not by when they were typed, so a
 bill logged today with `date:yesterday` slots in below yesterday's entries rather

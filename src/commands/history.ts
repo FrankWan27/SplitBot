@@ -103,8 +103,12 @@ function describe(entry: LedgerEntry): string {
   // Italic, so the provenance reads as an aside rather than competing with the
   // amount. `-#` subtext would be smaller still, but Discord only parses it in
   // message content - inside an embed description it prints the `-#` literally.
-  // Always shown: it is the audit trail, and at this size it costs a glance.
-  lines.push(`_${when} - Logged by <@${entry.createdBy}>_`);
+  //
+  // The logger is named only when it is not the payer. Usually the two are the
+  // same person and "Logged by" restates the line above it; naming them only on
+  // the exception is what makes the exception visible at a glance.
+  const onBehalf = entry.createdBy !== entry.payerId;
+  lines.push(onBehalf ? `_${when} - Logged by <@${entry.createdBy}>_` : `_${when}_`);
   return lines.join('\n');
 }
 

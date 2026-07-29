@@ -707,10 +707,10 @@ test('e2e: a bill renders as amount, payer with headcount, borrowers, then prove
 
   // The whole entry, anchored, so a line landing in the wrong order fails: a
   // date heading, the amount, who paid and for how many, who borrowed what, and
-  // the provenance in italics.
+  // the time in italics. Alice both paid and logged it, so no "Logged by".
   assert.match(
     text,
-    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n_<t:\d+:R> - Logged by <@100>_$/m,
+    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n_<t:\d+:R>_$/m,
   );
   store.close();
 });
@@ -911,7 +911,7 @@ test('e2e: history names who logged a bill on another persons behalf', async () 
   store.close();
 });
 
-test('e2e: the provenance line names the logger even when they are the payer', async () => {
+test('e2e: the logger is not named when they are the payer', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -921,9 +921,12 @@ test('e2e: the provenance line names the logger even when they are the payer', a
 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
-  // Unconditional, unlike the old format: as an italic aside it costs a glance, and
-  // omitting it would make its presence elsewhere read as an accusation.
-  assert.match(replyText(run.replies[0]!), /_<t:\d+:R> - Logged by <@100>_$/m);
+  const text = replyText(run.replies[0]!);
+  // The common case: "Logged by @alice" under "Paid by @alice" only restates the
+  // line above, and naming the logger unconditionally makes the one case that
+  // matters - somebody logging on another person's behalf - impossible to spot.
+  assert.match(text, /_<t:\d+:R>_$/m);
+  assert.doesNotMatch(text, /Logged by/);
   store.close();
 });
 

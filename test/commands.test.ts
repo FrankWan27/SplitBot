@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../src/db.js';
+import { Store, type BillEntry } from '../src/db.js';
 import { UserError } from '../src/errors.js';
 import * as bill from '../src/commands/bill.js';
 import * as balances from '../src/commands/balances.js';
@@ -398,6 +398,95 @@ test('e2e: contradicting include_payer and with is refused', async () => {
     booleans: { include_payer: false },
   });
   await assert.rejects(() => bill.execute(run.interaction, store), /include_payer/);
+  store.close();
+});
+
+test('e2e: a bill with no date happened when it was logged', async () => {
+  const store = new Store(':memory:');
+  const run = makeInteraction({
+    caller: ALICE,
+    strings: { amount: '10', with: '<@200>', description: 'lunch' },
+  });
+  await bill.execute(run.interaction, store);
+
+  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+  assert.equal(entry.occurredAt, null);
+  assert.doesNotMatch(replyText(run.replies[0]!), /Dated/, 'nothing to echo back');
+  store.close();
+});
+
+test('e2e: a dated bill stores the date and echoes back the day it read', async () => {
+  const store = new Store(':memory:');
+  const run = makeInteraction({
+    caller: ALICE,
+    strings: { amount: '10', with: '<@200>', description: 'taxi', date: 'yesterday' },
+  });
+  await bill.execute(run.interaction, store);
+
+  // Derived from the clock rather than hardcoded, since /bill uses the real one.
+  const now = new Date();
+  const expected = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1, 12),
+  ).toISOString();
+
+  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+  assert.equal(entry.occurredAt, expected, 'stored as noon UTC on yesterday');
+  assert.notEqual(entry.createdAt, entry.occurredAt, 'logged now, happened yesterday');
+
+  // The echoed timestamp must be the date that was stored, or the confirmation
+  // would tell the user something different from what the ledger holds.
+  const echoed = replyText(run.replies[0]!).match(/Dated <t:(\d+):D>/);
+  assert.ok(echoed, 'the reply confirms the date it parsed');
+  assert.equal(Number(echoed[1]) * 1000, Date.parse(expected));
+  store.close();
+});
+
+test('e2e: a date the parser cannot read is refused and nothing is written', async () => {
+  const store = new Store(':memory:');
+  for (const date of ['last tuesday', '2026-13-01', '2026-02-30', '7/20/26', 'soon']) {
+    const run = makeInteraction({
+      caller: ALICE,
+      strings: { amount: '10', with: '<@200>', description: 'x', date },
+    });
+    await assert.rejects(() => bill.execute(run.interaction, store), UserError, date);
+  }
+  assert.deepEqual(store.allBalances(GUILD), [], 'a rejected date leaves no debt behind');
+  assert.equal(store.recentEntries({ guildId: GUILD, limit: 10 }).entries.length, 0);
+  store.close();
+});
+
+test('e2e: a backdated bill lands in its chronological place in history', async () => {
+  const store = new Store(':memory:');
+  // Logged in this order, so insertion order alone would list them reversed.
+  for (const [description, date] of [
+    ['three days ago', '3'],
+    ['today', 'today'],
+    ['yesterday', 'yesterday'],
+  ] as const) {
+    const now = new Date();
+    const iso =
+      date === 'today' || date === 'yesterday'
+        ? date
+        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 3, 12))
+            .toISOString()
+            .slice(0, 10);
+    const run = makeInteraction({
+      caller: ALICE,
+      strings: { amount: '10', with: '<@200>', description, date: iso },
+    });
+    await bill.execute(run.interaction, store);
+  }
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  const order = ['today', 'yesterday', 'three days ago'].map((d) => text.indexOf(d));
+  assert.ok(order.every((i) => i >= 0), 'all three bills are listed');
+  assert.deepEqual(
+    [...order].sort((a, b) => a - b),
+    order,
+    `newest first, got:\n${text}`,
+  );
   store.close();
 });
 

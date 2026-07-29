@@ -16,6 +16,7 @@ Log a bill and split it evenly.
 | `description` | yes | What it was for, e.g. `dinner at Nopa` |
 | `payer` | no | Who actually paid; defaults to you |
 | `include_payer` | no | Whether the payer shares the cost; defaults to yes |
+| `date` | no | When it happened, if not now; defaults to right now |
 
 `description` is required. Discord will not accept a blank or whitespace-only
 value for a required option, so every bill has a real one - which is the point,
@@ -43,6 +44,34 @@ Useful when someone else fronted the cash and is not around to log it.
 ```
 
 You fronted $30 for bob and carol but are not taking a share, so they owe $15 each.
+
+```
+/bill amount:24 with:@bob description:taxi date:yesterday
+```
+
+Logs a bill that happened earlier, for when you forgot at the time.
+
+#### Backdating with `date`
+
+Discord has no date option type - there is no calendar picker to offer - so `date`
+is free text. Accepted forms:
+
+| Input | Means |
+|---|---|
+| `today`, `yesterday` | what it says |
+| `2026-07-20` | an explicit year-month-day |
+| `7/20/2026` | month first, matching the `en-US` formatting used elsewhere |
+| `7/20` | the most recent time that date happened, so `12/28` typed in January is last December |
+
+The string is parsed digit-by-digit rather than handed to `new Date()`, which
+accepts almost anything and guesses at the rest. A two-digit year is refused as
+ambiguous rather than guessed at, an impossible date like `2026-06-31` is refused
+rather than rolled forward into July, and a date in the future or over five years
+old is refused as a likely typo. The `/bill` reply echoes back the date it read,
+since that is the only way to confirm `7/20` was understood the way you meant it.
+
+A backdated bill affects balances immediately, exactly like any other bill - the
+date only changes where it sits in `/history`.
 
 ### `/balances`
 
@@ -144,6 +173,13 @@ Someone who only *typed* the command for other people is not counted as
 involved, but the listing notes who logged it on its own last line when that
 differs from who paid.
 
+**Backdated bills sort by when they happened**, not by when they were typed, so a
+bill logged today with `date:yesterday` slots in below yesterday's entries rather
+than jumping to the top. Two facts are stored separately: when a bill was logged,
+and when it happened. The listing shows and orders by the latter; the former stays
+in the ledger, so a backdated entry remains identifiable and the audit trail is
+intact. Entries on the same date keep their insertion order.
+
 ## Setup
 
 ### 1. Create the Discord application
@@ -198,6 +234,10 @@ what `/history` reads. Balances are never computed from it - they are maintained
 directly - so the two are independent: a display bug in the history cannot
 corrupt a balance, and the log stays a faithful record of what was entered.
 
+Opening the database brings an older file up to the current schema by adding any
+columns it is missing. New columns are nullable with no default, which is what
+makes this safe to apply to rows already written, and re-opening is a no-op.
+
 ### Money is never a float
 
 All arithmetic and storage uses integer cents. Dollar strings are parsed
@@ -229,7 +269,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 104 tests: money math, ledger invariants, and end-to-end command runs
+npm test     # 131 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

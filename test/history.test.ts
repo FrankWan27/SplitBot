@@ -32,6 +32,102 @@ function bill(
   });
 }
 
+/** Records a bill that was logged at `createdAt` but happened at `occurredAt`. */
+function backdatedBill(
+  s: Store,
+  description: string,
+  createdAt: string,
+  occurredAt: string,
+): void {
+  s.recordBill({
+    guildId: G,
+    payerId: alice,
+    totalCents: 1000,
+    splits: [
+      { userId: alice, shareCents: 500 },
+      { userId: bob, shareCents: 500 },
+    ],
+    description,
+    createdBy: alice,
+    createdAt,
+    occurredAt,
+  });
+}
+
+/** Descriptions of every entry, in the order /history would list them. */
+function order(s: Store, limit = 50): (string | null)[] {
+  return s
+    .recentEntries({ guildId: G, limit })
+    .entries.map((e) => (e.kind === 'bill' ? e.description : 'payment'));
+}
+
+test('a backdated bill sorts by when it happened, not when it was logged', () => {
+  const s = new Store(':memory:');
+  // Logged in ascending order, so insertion order and date order disagree.
+  bill(s, alice, 1000, [alice, bob], 'six days ago', alice, '2026-07-22T10:00:00.000Z');
+  bill(s, alice, 1000, [alice, bob], 'yesterday', alice, '2026-07-27T10:00:00.000Z');
+  // Typed last, dated earliest: it belongs at the bottom, not the top.
+  backdatedBill(s, 'last week', '2026-07-28T10:00:00.000Z', '2026-07-20T12:00:00.000Z');
+
+  assert.deepEqual(order(s), ['yesterday', 'six days ago', 'last week']);
+  s.close();
+});
+
+test('a backdated bill keeps both dates, so the audit trail survives', () => {
+  const s = new Store(':memory:');
+  backdatedBill(s, 'taxi', '2026-07-28T10:00:00.000Z', '2026-07-20T12:00:00.000Z');
+
+  const entry = s.recentEntries({ guildId: G, limit: 1 }).entries[0] as BillEntry;
+  assert.equal(entry.createdAt, '2026-07-28T10:00:00.000Z', 'when it was logged');
+  assert.equal(entry.occurredAt, '2026-07-20T12:00:00.000Z', 'when it happened');
+  s.close();
+});
+
+test('an ordinary bill has no occurred_at, so it stays distinguishable', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'normal');
+
+  const entry = s.recentEntries({ guildId: G, limit: 1 }).entries[0] as BillEntry;
+  assert.equal(entry.occurredAt, null, 'null means "happened when logged"');
+  s.close();
+});
+
+test('entries on the same date stay in insertion order', () => {
+  const s = new Store(':memory:');
+  // Identical dates: without the id tie-breaker this ordering would be arbitrary.
+  for (const n of ['first', 'second', 'third']) {
+    backdatedBill(s, n, '2026-07-28T10:00:00.000Z', '2026-07-20T12:00:00.000Z');
+  }
+  assert.deepEqual(order(s), ['third', 'second', 'first']);
+  s.close();
+});
+
+test('backdating does not touch balances', () => {
+  const s = new Store(':memory:');
+  backdatedBill(s, 'old dinner', '2026-07-28T10:00:00.000Z', '2026-02-01T12:00:00.000Z');
+  // Debt is applied when the bill is recorded, regardless of the date it carries.
+  assert.equal(s.owedBetween(G, bob, alice), 500, 'bob owes his half either way');
+  s.close();
+});
+
+test('a payment never carries an occurred date, so it sorts by when it was made', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'dinner', alice, '2026-07-20T10:00:00.000Z');
+  s.recordPayment({
+    guildId: G,
+    fromId: bob,
+    toId: alice,
+    cents: 500,
+    createdBy: bob,
+    createdAt: '2026-07-25T10:00:00.000Z',
+  });
+  // A bill backdated before both must sort below both.
+  backdatedBill(s, 'older', '2026-07-28T10:00:00.000Z', '2026-07-01T12:00:00.000Z');
+
+  assert.deepEqual(order(s), ['payment', 'dinner', 'older']);
+  s.close();
+});
+
 test('history returns newest entries first', () => {
   const s = new Store(':memory:');
   bill(s, alice, 1000, [alice, bob], 'first');

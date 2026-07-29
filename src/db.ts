@@ -44,6 +44,8 @@ export interface BillEntry {
   splits: BillSplit[];
   createdBy: string;
   createdAt: string;
+  /** When it happened, if it was backdated. Null means "same as createdAt". */
+  occurredAt: string | null;
 }
 
 /** A logged payment from one person to another. */
@@ -58,6 +60,14 @@ export interface PaymentEntry {
 }
 
 export type LedgerEntry = BillEntry | PaymentEntry;
+
+/**
+ * When an entry happened, for display and ordering. A backdated bill reports the
+ * date it was given; everything else reports when it was logged.
+ */
+export function entryWhen(entry: LedgerEntry): string {
+  return (entry.kind === 'bill' ? entry.occurredAt : null) ?? entry.createdAt;
+}
 
 /**
  * Rebuild a typed entry from its stored row.
@@ -76,6 +86,7 @@ function toLedgerEntry(row: {
   total_cents: number;
   created_by: string;
   created_at: string;
+  occurred_at: string | null;
   detail_json: string;
 }): LedgerEntry {
   let detail: unknown;
@@ -118,6 +129,8 @@ function toLedgerEntry(row: {
     splits,
     createdBy: row.created_by,
     createdAt: row.created_at,
+    // A database written before this column existed reports it as undefined.
+    occurredAt: row.occurred_at ?? null,
   };
 }
 
@@ -129,7 +142,11 @@ function entryInvolves(entry: LedgerEntry, userId: string): boolean {
   return entry.payerId === userId || entry.splits.some((s) => s.userId === userId);
 }
 
-const SCHEMA = `
+/**
+ * Tables only. Indexes live separately in `INDEXES` because an index can name a
+ * column that `ADDED_COLUMNS` has yet to add, and creating it first fails.
+ */
+const TABLES = `
 CREATE TABLE IF NOT EXISTS balances (
   guild_id      TEXT    NOT NULL,
   user_lo       TEXT    NOT NULL,
@@ -148,11 +165,33 @@ CREATE TABLE IF NOT EXISTS entries (
   total_cents   INTEGER NOT NULL,
   created_by    TEXT    NOT NULL,
   created_at    TEXT    NOT NULL,
+  -- When the bill actually happened, when that differs from when it was logged.
+  -- Null on a normal entry, so created_at remains the record of what was entered
+  -- when and a backdated entry stays identifiable.
+  occurred_at   TEXT,
   detail_json   TEXT    NOT NULL
 ) STRICT;
-
-CREATE INDEX IF NOT EXISTS idx_entries_guild ON entries (guild_id, id DESC);
 `;
+
+/** Applied after the migration below, so every column they name exists. */
+const INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_entries_guild ON entries (guild_id, id DESC);
+
+-- /history orders by when things happened, falling back to insertion order for
+-- entries that were never backdated.
+CREATE INDEX IF NOT EXISTS idx_entries_guild_when
+  ON entries (guild_id, COALESCE(occurred_at, created_at) DESC, id DESC);
+`;
+
+/**
+ * Columns added after the first release. `CREATE TABLE IF NOT EXISTS` leaves an
+ * existing table alone, so a database created before a column existed needs it
+ * added explicitly. Each is nullable with no default, which is what makes this
+ * safe to apply to rows already written.
+ */
+const ADDED_COLUMNS: Array<{ table: string; column: string; type: string }> = [
+  { table: 'entries', column: 'occurred_at', type: 'TEXT' },
+];
 
 export class Store {
   private readonly db: DatabaseSync;
@@ -167,7 +206,26 @@ export class Store {
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA synchronous = NORMAL');
     this.db.exec('PRAGMA foreign_keys = ON');
-    this.db.exec(SCHEMA);
+    this.db.exec(TABLES);
+    this.addMissingColumns();
+    this.db.exec(INDEXES);
+  }
+
+  /**
+   * Bring an older database up to the current schema. Runs on every open, which
+   * is cheap: it reads the table definition and does nothing when the column is
+   * already there.
+   */
+  private addMissingColumns(): void {
+    for (const { table, column, type } of ADDED_COLUMNS) {
+      const existing = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+      }>;
+      if (existing.some((c) => c.name === column)) continue;
+      // Not parameterisable - identifiers cannot be bound - but these values are
+      // the hardcoded constants above, never user input.
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   close(): void {
@@ -240,6 +298,8 @@ export class Store {
     description: string | null;
     createdBy: string;
     createdAt: string;
+    /** When it happened, if backdated. Null means it happened when it was logged. */
+    occurredAt?: string | null;
   }): void {
     this.transact(() => {
       for (const { userId, shareCents } of args.splits) {
@@ -249,8 +309,9 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO entries
-             (guild_id, kind, description, payer_id, total_cents, created_by, created_at, detail_json)
-           VALUES (?, 'bill', ?, ?, ?, ?, ?, ?)`,
+             (guild_id, kind, description, payer_id, total_cents, created_by, created_at,
+              occurred_at, detail_json)
+           VALUES (?, 'bill', ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           args.guildId,
@@ -259,6 +320,7 @@ export class Store {
           args.totalCents,
           args.createdBy,
           args.createdAt,
+          args.occurredAt ?? null,
           JSON.stringify(args.splits),
         );
     });
@@ -329,6 +391,10 @@ export class Store {
    *
    * `offset` skips that many matching entries, which is what the paging buttons
    * on `/history` walk through.
+   *
+   * Ordered by when entries *happened*, so a backdated bill sits in its true
+   * chronological place rather than jumping to the top because it was typed last.
+   * Insertion order breaks ties, which keeps two bills on the same date stable.
    */
   recentEntries(args: {
     guildId: string;
@@ -343,8 +409,10 @@ export class Store {
 
     const rows = this.db
       .prepare(
-        `SELECT id, kind, description, payer_id, total_cents, created_by, created_at, detail_json
-           FROM entries WHERE guild_id = ? ORDER BY id DESC`,
+        `SELECT id, kind, description, payer_id, total_cents, created_by, created_at,
+                occurred_at, detail_json
+           FROM entries WHERE guild_id = ?
+          ORDER BY COALESCE(occurred_at, created_at) DESC, id DESC`,
       )
       .all(args.guildId) as Array<{
       id: number;
@@ -354,6 +422,7 @@ export class Store {
       total_cents: number;
       created_by: string;
       created_at: string;
+      occurred_at: string | null;
       detail_json: string;
     }>;
 

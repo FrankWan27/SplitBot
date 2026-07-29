@@ -243,3 +243,79 @@ test('data survives reopening the same database file', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a database written before occurred_at existed gains the column and still reads', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = await mkdtemp(join(tmpdir(), 'splitbot-migrate-'));
+  const path = join(dir, 'splits.db');
+
+  try {
+    // The original schema, byte for byte, including the row shape it wrote.
+    // `CREATE TABLE IF NOT EXISTS` will leave this table alone, so only the
+    // explicit migration can bring it up to date.
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE entries (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id      TEXT    NOT NULL,
+        kind          TEXT    NOT NULL CHECK (kind IN ('bill', 'payment')),
+        description   TEXT,
+        payer_id      TEXT    NOT NULL,
+        total_cents   INTEGER NOT NULL,
+        created_by    TEXT    NOT NULL,
+        created_at    TEXT    NOT NULL,
+        detail_json   TEXT    NOT NULL
+      ) STRICT;
+    `);
+    old
+      .prepare(
+        `INSERT INTO entries
+           (guild_id, kind, description, payer_id, total_cents, created_by, created_at, detail_json)
+         VALUES (?, 'bill', 'old dinner', ?, 2000, ?, ?, ?)`,
+      )
+      .run(G, alice, alice, AT, JSON.stringify([{ userId: bob, shareCents: 1000 }]));
+    old.close();
+
+    const store = new Store(path);
+    const entries = store.recentEntries({ guildId: G, limit: 10 }).entries;
+    assert.equal(entries.length, 1, 'the pre-existing row is still readable');
+    const entry = entries[0]!;
+    assert.equal(entry.kind, 'bill');
+    assert.equal(entry.description, 'old dinner');
+    assert.equal(entry.totalCents, 2000);
+    // Missing rather than null in the raw row, which would leak as `undefined`
+    // and render as "undefined" in the history listing.
+    assert.equal(entry.occurredAt, null, 'a row written before the column reads as null');
+
+    // The added column has to be writable too, not merely present.
+    store.recordBill({
+      guildId: G,
+      payerId: alice,
+      totalCents: 1000,
+      splits: [{ userId: bob, shareCents: 1000 }],
+      description: 'backdated after migrating',
+      createdBy: alice,
+      createdAt: '2026-07-28T10:00:00.000Z',
+      occurredAt: '2025-12-25T12:00:00.000Z',
+    });
+
+    // Dated before the old row, so it must sort below it.
+    assert.deepEqual(
+      store.recentEntries({ guildId: G, limit: 10 }).entries.map((e) =>
+        e.kind === 'bill' ? e.description : 'payment',
+      ),
+      ['old dinner', 'backdated after migrating'],
+    );
+    store.close();
+
+    // Opening again must be a no-op rather than a duplicate-column error.
+    const reopened = new Store(path);
+    assert.equal(reopened.recentEntries({ guildId: G, limit: 10 }).entries.length, 2);
+    reopened.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

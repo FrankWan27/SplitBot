@@ -7,7 +7,7 @@ import {
   type ButtonInteraction,
   type ChatInputCommandInteraction,
 } from 'discord.js';
-import type { BillEntry, LedgerEntry, Store } from '../db.js';
+import { entryWhen, type BillEntry, type LedgerEntry, type Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
 
@@ -58,7 +58,9 @@ function splitWith(entry: BillEntry): string | null {
 }
 
 function describe(entry: LedgerEntry): string {
-  const when = timestamp(entry.createdAt);
+  // Backdated bills report when they happened, not when they were typed, which
+  // is also the order the listing is sorted in.
+  const when = timestamp(entryWhen(entry));
   const suffix = when ? ` · ${when}` : '';
 
   if (entry.kind === 'payment') {

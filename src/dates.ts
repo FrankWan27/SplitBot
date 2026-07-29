@@ -36,6 +36,75 @@ const MAX_FUTURE_DAYS = 1;
 
 const MS_PER_DAY = 86_400_000;
 
+/**
+ * Timezone the `/history` date headings are computed in.
+ *
+ * Grouping entries under a calendar day forces a choice of timezone: an entry
+ * logged at 6pm in California is already the next day in UTC. A Discord
+ * timestamp cannot help here, because the grouping has to be decided once,
+ * server-side, for everyone reading the message - unlike the relative times in
+ * the listing, which each reader's client localises.
+ *
+ * Defaults to UTC, which is the only defensible guess for a server whose members
+ * could be anywhere. Set `DISPLAY_TIMEZONE` to an IANA name (`America/Los_Angeles`)
+ * to group by the day your group actually lives in.
+ */
+export function displayTimeZone(): string {
+  const raw = process.env['DISPLAY_TIMEZONE']?.trim();
+  if (!raw) return 'UTC';
+  try {
+    // Constructing the formatter is the only way to ask whether the runtime
+    // knows the zone; an unknown name throws RangeError.
+    new Intl.DateTimeFormat('en-US', { timeZone: raw });
+    return raw;
+  } catch {
+    console.warn(`DISPLAY_TIMEZONE "${raw}" is not a timezone I recognise; grouping by UTC.`);
+    return 'UTC';
+  }
+}
+
+/** The year, month and day `iso` falls on in `timeZone`, or null if unparseable. */
+function partsIn(
+  iso: string,
+  timeZone: string,
+): { year: string; month: string; day: string } | null {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return null;
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(ms));
+
+  const find = (type: string): string | undefined => parts.find((p) => p.type === type)?.value;
+  const [year, month, day] = [find('year'), find('month'), find('day')];
+  if (!year || !month || !day) return null;
+  return { year, month, day };
+}
+
+/**
+ * Which calendar day `iso` belongs to, as a sortable `YYYY-MM-DD` string. Used
+ * only to decide where one date group ends and the next begins, never displayed.
+ */
+export function dayKey(iso: string, timeZone: string): string | null {
+  const p = partsIn(iso, timeZone);
+  return p ? `${p.year}-${p.month}-${p.day}` : null;
+}
+
+/**
+ * The `MM/DD` heading for a date group. The year is appended only when it is not
+ * the current one, since `07/27` alone is genuinely ambiguous on an old entry and
+ * redundant on a recent one.
+ */
+export function dayHeading(iso: string, timeZone: string, now: Date = new Date()): string | null {
+  const p = partsIn(iso, timeZone);
+  if (!p) return null;
+  const thisYear = partsIn(now.toISOString(), timeZone)?.year;
+  return p.year === thisYear ? `${p.month}/${p.day}` : `${p.month}/${p.day}/${p.year}`;
+}
+
 /** Days in `month` (1-12) of `year`, Gregorian leap rules included. */
 function daysInMonth(year: number, month: number): number {
   if (month === 2) {

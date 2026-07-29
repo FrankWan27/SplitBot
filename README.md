@@ -119,35 +119,52 @@ totals, so the history is what tells you *what* a debt was for.
 /history count:25         # a longer stretch
 ```
 
-Each bill reads as three short lines - what and how much, who paid and when, then
-who it was split with:
+Entries are grouped under a `MM/DD` date heading, and each one reads as the
+amount and what it was for, who paid and for how many, who borrowed what, then the
+time and who logged it as subtext:
 
 ```
-$10.00 - Trader Joes
-paid by @franky · 15 minutes ago
-split with @mikula, @pepega8359
+## 07/27
+ **$21.45 - Trader Joes**
+Paid by @franky for 3 people.
+_@mikula @pepega8359 borrowed $7.15._
+-# 4 hours ago - Logged by @franky
 
-$5.00
-@mikula paid @franky · 2 hours ago
+ **$12.32 - Molly Tea**
+Paid by @franky for 3 people.
+_@mikula @pepega8359 borrowed $4.10._
+-# 4 hours ago - Logged by @franky
+
+## 07/26
+ **$7.15**
+@mikula paid @franky.
+-# yesterday
 ```
 
-A fourth line appears only when someone logged a bill on another person's behalf,
-which is the case worth being able to audit later:
+The heading appears once per day, not once per entry, so a busy day reads as one
+block. The year is added (`12/25/2025`) only on entries from a previous year,
+where `12/25` alone would be genuinely ambiguous. Each page of a long history
+repeats the heading for whichever day it opens on, so a page is readable on its
+own.
 
-```
-$24.00 - taxi
-paid by @mikula · 3 days ago
-split with @franky, @pepega8359
-logged by @franky
-```
-
-Individual shares are not listed. They are always the total divided by the number
-of participants, give or take the odd penny, so printing them adds length without
-adding information - `/balances` is where the amounts live.
+The headcount counts everyone the bill was divided between, including the payer
+when they took a share, which is what makes the borrowed figure divide the total.
+When a total does not divide evenly the borrowers do not all owe the same amount,
+so each distinct share gets its own line rather than one figure that would be
+wrong for somebody.
 
 Very large groups name the first eight and summarise the rest as `and N more`, and
 a long listing is trimmed from the oldest end to stay inside Discord's embed limit
-rather than being rejected outright.
+rather than being rejected outright. A date heading is never left stranded with
+nothing under it: entries are appended whole, heading included.
+
+**Timezone.** Grouping by calendar day forces a choice of zone, because an entry
+logged at 6pm in California is already the next day in UTC. Unlike the relative
+times in the listing, which each reader's Discord client localises, the grouping
+has to be decided once, server-side, for everyone reading the message. It defaults
+to UTC; set `DISPLAY_TIMEZONE` in `.env` to an IANA name such as
+`America/Los_Angeles` to group by the day your group actually lives in. An
+unrecognised name logs a warning and falls back to UTC rather than failing.
 
 **Paging.** When there is more history than fits, ⬆️ Newer and ⬇️ Older buttons
 walk through it, editing the same message in place instead of posting a new
@@ -170,8 +187,8 @@ one of the people it was split between, or either side of a payment. A bill you
 were merely charged for still shows up, which is usually the reason to look.
 
 Someone who only *typed* the command for other people is not counted as
-involved, but the listing notes who logged it on its own last line when that
-differs from who paid.
+involved, but the subtext always names them, so a bill logged on someone else's
+behalf is visible without having to compare it against who paid.
 
 **Backdated bills sort by when they happened**, not by when they were typed, so a
 bill logged today with `date:yesterday` slots in below yesterday's entries rather
@@ -205,6 +222,11 @@ npm run build
 npm run deploy            # register slash commands with Discord
 npm start
 ```
+
+Set `DISPLAY_TIMEZONE` to your group's timezone (`America/Los_Angeles`) so the
+`/history` date headings match the days you actually had dinner on. It defaults to
+UTC, which puts an evening bill on the wrong side of midnight for most of the
+Americas.
 
 While developing, set `DISCORD_GUILD_ID` in `.env` to your server's id.
 Commands then register to that one server and appear instantly rather than taking
@@ -269,7 +291,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 131 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 147 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

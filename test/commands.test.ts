@@ -618,7 +618,7 @@ test('e2e: history shows the description that was logged with the bill', async (
   assert.match(text, /Recent history/);
   assert.match(text, /dinner at Nopa/);
   assert.match(text, /\$42\.50/);
-  assert.match(text, /paid by <@100>/);
+  assert.match(text, /Paid by <@100>/);
   store.close();
 });
 
@@ -693,11 +693,11 @@ test('e2e: a bill with no description is labelled rather than left blank', async
   store.close();
 });
 
-test('e2e: a bill renders as amount, payer with time, then who it was split with', async () => {
+test('e2e: a bill renders as amount, payer with headcount, borrowers, then subtext', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
-    strings: { amount: '10', with: '<@200> <@300>', description: 'Trader Joes' },
+    strings: { amount: '9', with: '<@200> <@300>', description: 'Trader Joes' },
   });
   await bill.execute(b.interaction, store);
 
@@ -705,17 +705,69 @@ test('e2e: a bill renders as amount, payer with time, then who it was split with
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
-  // Three lines: the amount and what it was for, who paid and when, then the
-  // people it was split with. Per-person amounts are deliberately absent.
+  // The whole entry, anchored, so a line landing in the wrong order fails: a
+  // date heading, the amount, who paid and for how many, who borrowed what, and
+  // the provenance as subtext.
   assert.match(
     text,
-    /\*\*\$10\.00\*\* - Trader Joes\npaid by <@100> · <t:\d+:R>\nsplit with <@200>, <@300>/,
+    /^## \d\d\/\d\d\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n_<@200> <@300> borrowed \$3\.00\._\n-# <t:\d+:R> - Logged by <@100>$/m,
   );
-  assert.doesNotMatch(text, /\$3\.33|\$3\.34|each/, 'individual shares are not listed');
   store.close();
 });
 
-test('e2e: a bill the payer took no share of still lists who it was split with', async () => {
+test('e2e: an uneven split states each distinct share rather than one wrong figure', async () => {
+  const store = new Store(':memory:');
+  // $10 across three is 3.34 / 3.33 / 3.33. Written directly rather than through
+  // /bill, because /bill hands the spare penny to a random participant: when the
+  // payer draws it the two borrowers owe the same and there is nothing uneven
+  // left to assert, which made this test fail about one run in three.
+  store.recordBill({
+    guildId: GUILD,
+    payerId: ALICE.id,
+    totalCents: 1000,
+    splits: [
+      { userId: ALICE.id, shareCents: 333 },
+      { userId: BOB.id, shareCents: 334 },
+      { userId: CAROL.id, shareCents: 333 },
+    ],
+    description: 'Trader Joes',
+    createdBy: ALICE.id,
+    createdAt: '2026-07-27T12:00:00.000Z',
+  });
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // Reconstruct who-owes-what from the rendered lines and require it to match the
+  // ledger exactly. Anything looser passes when the two shares are collapsed onto
+  // a single line, which would print an amount one of them does not owe.
+  const rendered = new Map<string, number>();
+  for (const line of text.split('\n')) {
+    const m = line.match(/^_(.+) borrowed \$(\d+\.\d\d)\._$/);
+    if (!m) continue;
+    const cents = Math.round(Number(m[2]) * 100);
+    for (const id of m[1]!.match(/<@(\d+)>/g) ?? []) {
+      rendered.set(id.slice(2, -1), cents);
+    }
+  }
+
+  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+  const expected = new Map(
+    entry.splits.filter((s) => s.userId !== entry.payerId).map((s) => [s.userId, s.shareCents]),
+  );
+  assert.deepEqual(
+    [...rendered].sort(),
+    [...expected].sort(),
+    `the listing must state each borrower's real share:\n${text}`,
+  );
+  // Whoever drew the spare penny owes a cent more, so the two lines differ.
+  assert.equal(new Set(expected.values()).size, 2, 'this split is genuinely uneven');
+  assert.equal((text.match(/borrowed/g) ?? []).length, 2, 'one line per distinct share');
+  store.close();
+});
+
+test('e2e: a bill the payer took no share of counts only the borrowers', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -726,11 +778,31 @@ test('e2e: a bill the payer took no share of still lists who it was split with',
 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
-  assert.match(replyText(run.replies[0]!), /paid by <@100>[^\n]*\nsplit with <@200>, <@300>/);
+  // Two people, not three: the payer took no share, so counting them would make
+  // the per-person figure fail to divide the total.
+  assert.match(
+    replyText(run.replies[0]!),
+    /Paid by <@100> for 2 people\.\n_<@200> <@300> borrowed \$10\.00\._/,
+  );
   store.close();
 });
 
-test('e2e: a payment renders as amount then who paid whom', async () => {
+test('e2e: a bill split with one other person reads "person", not "people"', async () => {
+  const store = new Store(':memory:');
+  const b = makeInteraction({
+    caller: ALICE,
+    strings: { amount: '20', with: '<@200>', description: 'fronted it' },
+    booleans: { include_payer: false },
+  });
+  await bill.execute(b.interaction, store);
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /for 1 person\./);
+  store.close();
+});
+
+test('e2e: a payment renders as amount, who paid whom, then subtext', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -743,8 +815,14 @@ test('e2e: a payment renders as amount then who paid whom', async () => {
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /\*\*\$10\.00\*\*\n<@200> paid <@100> · <t:\d+:R>/);
-  assert.doesNotMatch(text, /split with <@200> paid/, 'a payment has no split line');
+
+  // Scoped to the payment's own block: the bill below it legitimately has a
+  // borrowed line, so asserting over the whole listing would prove nothing.
+  const block = text.split('\n\n').find((b) => b.includes('paid <@100>'));
+  assert.ok(block, `expected a payment block in:\n${text}`);
+  assert.match(block, / \*\*\$10\.00\*\*\n<@200> paid <@100>\.\n-# <t:\d+:R>$/);
+  assert.doesNotMatch(block, /Paid by .* for/, 'a payment has no headcount line');
+  assert.doesNotMatch(block, /borrowed/, 'a payment has no borrowed line');
   store.close();
 });
 
@@ -767,7 +845,10 @@ test('e2e: a very large group is summarised rather than listing everyone', async
   assert.match(text, /<@1000>/, 'the first names are still shown');
   assert.match(text, /<@1007>/);
   assert.doesNotMatch(text, /<@1008>/, 'the tail is summarised, not listed');
-  assert.match(text, /and 4 more$/m);
+  assert.match(text, /and 4 more borrowed \$1\.00\./);
+  // The headcount reports everyone, even those the line does not name, or the
+  // per-person figure would look like it did not divide the total.
+  assert.match(text, /for 12 people\./);
   store.close();
 });
 
@@ -810,7 +891,7 @@ test('e2e: history stays within Discord embed limits when names are long', async
   store.close();
 });
 
-test('e2e: history notes when someone logged a bill on another persons behalf', async () => {
+test('e2e: history names who logged a bill on another persons behalf', async () => {
   const store = new Store(':memory:');
   // Carol types it, but bob paid.
   const b = makeInteraction({
@@ -823,15 +904,14 @@ test('e2e: history notes when someone logged a bill on another persons behalf', 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  // A fourth line of its own, after the split, rather than crowding the payer line.
-  assert.match(
-    text,
-    /\*\*\$10\.00\*\* - taxi\npaid by <@200> · <t:\d+:R>\nsplit with <@100>\nlogged by <@300>/,
-  );
+  // The payer and the person who logged it are different, and the subtext is
+  // where that distinction has to be visible.
+  assert.match(text, /Paid by <@200> for 2 people\./);
+  assert.match(text, /-# <t:\d+:R> - Logged by <@300>$/m);
   store.close();
 });
 
-test('e2e: history has no logged-by line when the payer logged it themselves', async () => {
+test('e2e: the subtext names the logger even when they are the payer', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -841,9 +921,201 @@ test('e2e: history has no logged-by line when the payer logged it themselves', a
 
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
+  // Unconditional, unlike the old format: as subtext it costs a glance, and
+  // omitting it would make its presence elsewhere read as an accusation.
+  assert.match(replyText(run.replies[0]!), /-# <t:\d+:R> - Logged by <@100>$/m);
+  store.close();
+});
+
+test('e2e: entries on the same day share one heading', async () => {
+  const store = new Store(':memory:');
+  // Three bills, same calendar day, logged minutes apart.
+  for (const [i, description] of ['first', 'second', 'third'].entries()) {
+    store.recordBill({
+      guildId: GUILD,
+      payerId: ALICE.id,
+      totalCents: 1000,
+      splits: [
+        { userId: ALICE.id, shareCents: 500 },
+        { userId: BOB.id, shareCents: 500 },
+      ],
+      description,
+      createdBy: ALICE.id,
+      createdAt: `2026-07-27T1${i}:00:00.000Z`,
+    });
+  }
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.doesNotMatch(text, /logged by/, 'the usual case stays three lines');
-  assert.match(text, /\*\*\$10\.00\*\* - taxi\npaid by <@100> · <t:\d+:R>\nsplit with <@200>$/m);
+
+  assert.equal((text.match(/^## /gm) ?? []).length, 1, `one heading, not three:\n${text}`);
+  assert.match(text, /^## 07\/27$/m);
+  // The heading opens the group, so every entry sits below it.
+  const heading = text.indexOf('## 07/27');
+  for (const d of ['first', 'second', 'third']) {
+    assert.ok(text.indexOf(d) > heading, `${d} should sit under the heading`);
+  }
+  store.close();
+});
+
+test('e2e: each day gets its own heading, in the order the days are listed', async () => {
+  const store = new Store(':memory:');
+  for (const [day, description] of [
+    ['25', 'oldest'],
+    ['26', 'middle'],
+    ['27', 'newest'],
+  ] as const) {
+    store.recordBill({
+      guildId: GUILD,
+      payerId: ALICE.id,
+      totalCents: 1000,
+      splits: [
+        { userId: ALICE.id, shareCents: 500 },
+        { userId: BOB.id, shareCents: 500 },
+      ],
+      description,
+      createdBy: ALICE.id,
+      createdAt: `2026-07-${day}T12:00:00.000Z`,
+    });
+  }
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.deepEqual(
+    (text.match(/^## .+$/gm) ?? []).map((h) => h.slice(3)),
+    ['07/27', '07/26', '07/25'],
+    'headings follow the newest-first ordering of the entries',
+  );
+  store.close();
+});
+
+test('e2e: a backdated bill is grouped under the day it happened', async () => {
+  const store = new Store(':memory:');
+  // Logged on the 28th, dated the 20th: it belongs under 07/20, not 07/28.
+  store.recordBill({
+    guildId: GUILD,
+    payerId: ALICE.id,
+    totalCents: 1000,
+    splits: [
+      { userId: ALICE.id, shareCents: 500 },
+      { userId: BOB.id, shareCents: 500 },
+    ],
+    description: 'backdated',
+    createdBy: ALICE.id,
+    createdAt: '2026-07-28T10:00:00.000Z',
+    occurredAt: '2026-07-20T12:00:00.000Z',
+  });
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /^## 07\/20$/m);
+  assert.doesNotMatch(text, /07\/28/, 'the day it was typed is not a heading');
+  store.close();
+});
+
+test('e2e: a heading is never left with no entries under it', async () => {
+  const store = new Store(':memory:');
+  // Each bill is its own day, so every entry carries a heading. Enough of them
+  // to force the length trim, which is where a stranded heading would appear.
+  const ids = Array.from({ length: 8 }, (_, i) => String(2000 + i));
+  for (let i = 0; i < 25; i++) {
+    store.recordBill({
+      guildId: GUILD,
+      payerId: ALICE.id,
+      totalCents: 800,
+      splits: ids.map((userId) => ({ userId, shareCents: 100 })),
+      description: `bill number ${i} with a reasonably wordy description`,
+      createdBy: ALICE.id,
+      createdAt: `2026-06-${String(i + 1).padStart(2, '0')}T12:00:00.000Z`,
+    });
+  }
+
+  const run = makeInteraction({ caller: ALICE, integers: { count: 25 } });
+  await history.execute(run.interaction, store);
+  const description = run.replies[0]!.embeds![0]!.data['description'] as string;
+
+  assert.ok(description.length <= 4096, `over the embed limit at ${description.length}`);
+  assert.doesNotMatch(description, /## [\d/]+$/, 'a heading is never the last thing shown');
+  // Every heading has an amount line after it.
+  const headings = description.match(/^## .+$/gm) ?? [];
+  assert.ok(headings.length > 0);
+  for (const h of headings) {
+    const after = description.slice(description.indexOf(h) + h.length);
+    assert.match(after, /^\n \*\*\$/, `heading ${h} has no entry under it`);
+  }
+  store.close();
+});
+
+test('e2e: a day split across a page boundary is headed on both pages', async () => {
+  const store = new Store(':memory:');
+  // Four bills on one day, two per page: the second page opens mid-day and still
+  // needs to say which day it is showing.
+  for (let i = 1; i <= 4; i++) {
+    store.recordBill({
+      guildId: GUILD,
+      payerId: ALICE.id,
+      totalCents: 1000,
+      splits: [
+        { userId: ALICE.id, shareCents: 500 },
+        { userId: BOB.id, shareCents: 500 },
+      ],
+      description: `bill ${i}`,
+      createdBy: ALICE.id,
+      createdAt: `2026-07-27T0${i}:00:00.000Z`,
+    });
+  }
+
+  const run = makeInteraction({ caller: ALICE, integers: { count: 2 } });
+  await history.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /^## 07\/27$/m);
+
+  const older = makeButtonClick(buttonNamed(run.replies[0]!, 'Older').custom_id);
+  await history.handleButton(older.interaction, store);
+  const next = replyText(older.updates[0]!);
+  assert.match(next, /^## 07\/27$/m, 'the second page repeats the heading, not a bare list');
+  assert.match(next, /bill 2/, 'and it is the continuation of the same day');
+  store.close();
+});
+
+test('e2e: the date headings follow DISPLAY_TIMEZONE, not the server clock', async () => {
+  const store = new Store(':memory:');
+  // 1am UTC on the 28th is 6pm on the 27th in Los Angeles. The two zones disagree
+  // about which day this is, which is the whole point of the setting.
+  store.recordBill({
+    guildId: GUILD,
+    payerId: ALICE.id,
+    totalCents: 1000,
+    splits: [
+      { userId: ALICE.id, shareCents: 500 },
+      { userId: BOB.id, shareCents: 500 },
+    ],
+    description: 'evening groceries',
+    createdBy: ALICE.id,
+    createdAt: '2026-07-28T01:00:00.000Z',
+  });
+
+  const headingWith = async (zone: string | undefined): Promise<string> => {
+    const original = process.env['DISPLAY_TIMEZONE'];
+    try {
+      if (zone === undefined) delete process.env['DISPLAY_TIMEZONE'];
+      else process.env['DISPLAY_TIMEZONE'] = zone;
+      const run = makeInteraction({ caller: ALICE });
+      await history.execute(run.interaction, store);
+      const found = replyText(run.replies[0]!).match(/^## (.+)$/m);
+      assert.ok(found, 'every entry sits under a heading');
+      return found[1]!;
+    } finally {
+      if (original === undefined) delete process.env['DISPLAY_TIMEZONE'];
+      else process.env['DISPLAY_TIMEZONE'] = original;
+    }
+  };
+
+  assert.equal(await headingWith(undefined), '07/28', 'unset means UTC');
+  assert.equal(await headingWith('America/Los_Angeles'), '07/27', 'grouped by the local day');
   store.close();
 });
 

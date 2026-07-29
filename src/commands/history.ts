@@ -8,6 +8,7 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import { entryWhen, type BillEntry, type LedgerEntry, type Store } from '../db.js';
+import { dayHeading, dayKey, displayTimeZone } from '../dates.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
 
@@ -47,37 +48,61 @@ function timestamp(iso: string): string {
   return `<t:${Math.floor(ms / 1000)}:R>`;
 }
 
-/** Names everyone a bill was split with, minus the payer named on the line above. */
-function splitWith(entry: BillEntry): string | null {
-  const others = entry.splits.filter((s) => s.userId !== entry.payerId);
-  if (others.length === 0) return null;
+/**
+ * Who borrowed how much, as one line per distinct share.
+ *
+ * Usually every borrower owes the same amount and this is a single line. An
+ * uneven split leaves one or two people a penny short, and lumping them under a
+ * single figure would state an amount somebody does not actually owe, so each
+ * distinct share gets its own line.
+ */
+function borrowedLines(entry: BillEntry): string[] {
+  const others = entry.splits.filter((s) => s.userId !== entry.payerId && s.shareCents > 0);
+  if (others.length === 0) return [];
 
-  const shown = others.slice(0, MAX_NAMES).map((s) => `<@${s.userId}>`);
-  const hidden = others.length - shown.length;
-  return `split with ${shown.join(', ')}${hidden > 0 ? ` and ${hidden} more` : ''}`;
+  // Keyed by share so the grouping is exact, and insertion-ordered so the
+  // largest-share line comes first only if it was listed first - the order the
+  // bill was entered in is the least surprising one.
+  const byShare = new Map<number, string[]>();
+  for (const { userId, shareCents } of others) {
+    const names = byShare.get(shareCents) ?? [];
+    names.push(`<@${userId}>`);
+    byShare.set(shareCents, names);
+  }
+
+  return [...byShare].map(([shareCents, names]) => {
+    const shown = names.slice(0, MAX_NAMES);
+    const hidden = names.length - shown.length;
+    const who = `${shown.join(' ')}${hidden > 0 ? ` and ${hidden} more` : ''}`;
+    return `_${who} borrowed ${formatCents(shareCents)}._`;
+  });
 }
 
 function describe(entry: LedgerEntry): string {
   // Backdated bills report when they happened, not when they were typed, which
   // is also the order the listing is sorted in.
   const when = timestamp(entryWhen(entry));
-  const suffix = when ? ` · ${when}` : '';
 
   if (entry.kind === 'payment') {
-    return `**${formatCents(entry.cents)}**\n` + `<@${entry.fromId}> paid <@${entry.toId}>${suffix}`;
+    return [
+      ` **${formatCents(entry.cents)}**`,
+      `<@${entry.fromId}> paid <@${entry.toId}>.`,
+      `-# ${when}`,
+    ].join('\n');
   }
 
+  // Counts everyone the bill was divided between, including the payer when they
+  // took a share, which is what makes the per-person figure below add up.
+  const people = entry.splits.length;
   const lines = [
-    `**${formatCents(entry.totalCents)}** - ${entry.description ?? '_no description_'}`,
-    `paid by <@${entry.payerId}>${suffix}`,
+    ` **${formatCents(entry.totalCents)} - ${entry.description ?? 'no description'}**`,
+    `Paid by <@${entry.payerId}> for ${people} ${people === 1 ? 'person' : 'people'}.`,
+    ...borrowedLines(entry),
   ];
-  const others = splitWith(entry);
-  if (others) lines.push(others);
 
-  // Only worth a line when someone logged a bill on another person's behalf,
-  // which is the case worth being able to audit later.
-  if (entry.createdBy !== entry.payerId) lines.push(`logged by <@${entry.createdBy}>`);
-
+  // Subtext, so the provenance is available without competing with the amount.
+  // Always shown: it is the audit trail, and at this size it costs a glance.
+  lines.push(`-# ${when} - Logged by <@${entry.createdBy}>`);
   return lines.join('\n');
 }
 
@@ -164,21 +189,37 @@ function buildPage(
     return { embeds: [empty], components: buttonRows(req, { hasMore: false, shown: 0 }) };
   }
 
-  // Naming every participant makes a line far longer than a count did, so 25
+  // Entries are grouped under a date heading, which means an entry's rendered
+  // length sometimes includes a heading and sometimes does not. Blocks are built
+  // first, then appended one whole entry at a time so a heading can never be
+  // stranded at the end with nothing under it.
+  const zone = displayTimeZone();
+  const blocks: string[] = [];
+  let lastDay: string | null = null;
+  for (const entry of entries) {
+    const iso = entryWhen(entry);
+    const day = dayKey(iso, zone);
+    // A heading opens a group; a null key means an unparseable timestamp, which
+    // stays under whatever heading precedes it rather than inventing one.
+    const heading = day !== null && day !== lastDay ? `## ${dayHeading(iso, zone)}\n` : '';
+    if (day !== null) lastDay = day;
+    blocks.push(heading + describe(entry));
+  }
+
+  // Naming every participant makes an entry far longer than a count did, so 25
   // bills in a big group can exceed Discord's embed limit. Drop from the oldest
   // end until it fits: sending a short listing beats the API rejecting the lot.
   const rendered: string[] = [];
   let length = 0;
-  for (const entry of entries) {
-    const line = describe(entry);
-    const added = length === 0 ? line.length : length + 2 + line.length;
+  for (const block of blocks) {
+    const added = length === 0 ? block.length : length + 2 + block.length;
     if (added > MAX_DESCRIPTION) {
       // A single entry can exceed the limit by itself if its description is
       // enormous. Truncate rather than reply with an empty embed.
-      if (rendered.length === 0) rendered.push(line.slice(0, MAX_DESCRIPTION - 1) + '…');
+      if (rendered.length === 0) rendered.push(block.slice(0, MAX_DESCRIPTION - 1) + '…');
       break;
     }
-    rendered.push(line);
+    rendered.push(block);
     length = added;
   }
   const dropped = entries.length - rendered.length;

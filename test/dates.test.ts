@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDateToIso, DateError } from '../src/dates.js';
+import {
+  parseDateToIso,
+  DateError,
+  dayKey,
+  dayHeading,
+  displayTimeZone,
+} from '../src/dates.js';
 
 /**
  * A fixed "now" so these tests do not change meaning with the calendar.
@@ -164,4 +170,75 @@ test('a real clock works, not just the injected one', () => {
   const today = parseDateToIso('today');
   assert.equal(today.slice(0, 10), new Date().toISOString().slice(0, 10));
   assert.doesNotThrow(() => parseDateToIso('yesterday'));
+});
+
+test('a day key is the calendar day in the given zone, not in UTC', () => {
+  // 6pm in Los Angeles on the 27th is already the 28th in UTC. Grouping has to
+  // follow the configured zone or an evening bill lands under tomorrow.
+  const evening = '2026-07-28T01:00:00.000Z';
+  assert.equal(dayKey(evening, 'UTC'), '2026-07-28');
+  assert.equal(dayKey(evening, 'America/Los_Angeles'), '2026-07-27');
+});
+
+test('two entries hours apart on the same local day share a key', () => {
+  const morning = dayKey('2026-07-27T15:00:00.000Z', 'America/Los_Angeles');
+  const evening = dayKey('2026-07-28T02:00:00.000Z', 'America/Los_Angeles');
+  assert.equal(morning, '2026-07-27');
+  assert.equal(evening, morning, 'same local day means one heading, not two');
+});
+
+test('a day key is null for a timestamp that cannot be parsed', () => {
+  // A corrupt row must not invent a heading of its own.
+  assert.equal(dayKey('not a date', 'UTC'), null);
+  assert.equal(dayHeading('not a date', 'UTC'), null);
+});
+
+test('a heading is MM/DD, zero-padded, with no year in the current year', () => {
+  const now = new Date('2026-07-28T00:00:00.000Z');
+  assert.equal(dayHeading('2026-07-27T12:00:00.000Z', 'UTC', now), '07/27');
+  // Zero-padded on both halves, so headings line up down the listing.
+  assert.equal(dayHeading('2026-01-05T12:00:00.000Z', 'UTC', now), '01/05');
+});
+
+test('a heading from another year carries the year, since MM/DD alone would lie', () => {
+  const now = new Date('2026-07-28T00:00:00.000Z');
+  assert.equal(dayHeading('2025-12-25T12:00:00.000Z', 'UTC', now), '12/25/2025');
+});
+
+test('a heading follows the display zone, matching the key it groups under', () => {
+  const now = new Date('2026-07-28T00:00:00.000Z');
+  const evening = '2026-07-28T01:00:00.000Z';
+  assert.equal(dayHeading(evening, 'America/Los_Angeles', now), '07/27');
+  // The heading and the key must agree, or entries would group under a heading
+  // naming a different day than they belong to.
+  assert.equal(dayKey(evening, 'America/Los_Angeles'), '2026-07-27');
+});
+
+test('a noon-UTC stored date keeps its day in the zones the parser claims', () => {
+  // The backdating parser stores noon UTC precisely so the day survives display.
+  const iso = parseDateToIso('2026-07-20', NOW);
+  for (const zone of ['UTC', 'America/Los_Angeles', 'Europe/Berlin', 'Asia/Tokyo']) {
+    assert.equal(dayKey(iso, zone), '2026-07-20', `slipped in ${zone}`);
+  }
+});
+
+test('the display zone defaults to UTC and rejects a name it does not know', () => {
+  const original = process.env['DISPLAY_TIMEZONE'];
+  try {
+    delete process.env['DISPLAY_TIMEZONE'];
+    assert.equal(displayTimeZone(), 'UTC', 'no configuration means UTC');
+
+    process.env['DISPLAY_TIMEZONE'] = 'America/Los_Angeles';
+    assert.equal(displayTimeZone(), 'America/Los_Angeles');
+
+    process.env['DISPLAY_TIMEZONE'] = '   ';
+    assert.equal(displayTimeZone(), 'UTC', 'blank is not a zone');
+
+    // A typo must not take the listing down; grouping by UTC is the safe fallback.
+    process.env['DISPLAY_TIMEZONE'] = 'Mars/Olympus_Mons';
+    assert.equal(displayTimeZone(), 'UTC');
+  } finally {
+    if (original === undefined) delete process.env['DISPLAY_TIMEZONE'];
+    else process.env['DISPLAY_TIMEZONE'] = original;
+  }
 });

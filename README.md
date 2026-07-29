@@ -172,7 +172,7 @@ logged at 6pm in California is already the next day in UTC. Unlike the relative
 times in the listing, which each reader's Discord client localises, the grouping
 has to be decided once, server-side, for everyone reading the message. It defaults
 to UTC; set `DISPLAY_TIMEZONE` in `.env` to an IANA name such as
-`America/Los_Angeles` to group by the day your group actually lives in. An
+`America/New_York` to group by the day your group actually lives in. An
 unrecognised name logs a warning and falls back to UTC rather than failing.
 
 **Paging.** When there is more history than fits, ⬆️ Newer and ⬇️ Older buttons
@@ -232,7 +232,7 @@ npm run deploy            # register slash commands with Discord
 npm start
 ```
 
-Set `DISPLAY_TIMEZONE` to your group's timezone (`America/Los_Angeles`) so the
+Set `DISPLAY_TIMEZONE` to your group's timezone (`America/New_York`) so the
 `/history` date headings match the days you actually had dinner on. It defaults to
 UTC, which puts an evening bill on the wrong side of midnight for most of the
 Americas.

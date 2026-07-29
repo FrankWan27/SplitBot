@@ -46,7 +46,6 @@ interface Reply {
   content?: string;
   embeds?: { data: Record<string, unknown> }[];
   components?: { toJSON(): { components: FakeButton[] } }[];
-  allowedMentions?: { parse: readonly string[] };
   flags?: number;
 }
 
@@ -150,7 +149,7 @@ function buttonNamed(reply: Reply, label: string): FakeButton {
   return found;
 }
 
-/** Flattens a reply into searchable text, whether it is content or an embed. */
+/** Flattens an embed reply into searchable text. */
 function replyText(reply: Reply): string {
   if (reply.content) return reply.content;
   const data = reply.embeds?.[0]?.data ?? {};
@@ -163,16 +162,6 @@ function replyText(reply: Reply): string {
   const footer = data['footer'] as { text?: string } | undefined;
   if (footer?.text) parts.push(footer.text);
   return parts.join('\n');
-}
-
-/**
- * The `/history` listing as Discord receives it. Sent as message content rather
- * than as an embed, because `-#` subtext and `##` headings only render there.
- */
-function historyContent(reply: Reply): string {
-  assert.ok(reply.content, 'the history listing must be message content, not an embed');
-  assert.equal(reply.embeds, undefined, 'no embed: subtext would not render inside one');
-  return reply.content;
 }
 
 test('e2e: bill then balances then settle, full lifecycle', async () => {
@@ -863,7 +852,7 @@ test('e2e: a very large group is summarised rather than listing everyone', async
   store.close();
 });
 
-test('e2e: history stays within Discord message limits when names are long', async () => {
+test('e2e: history stays within Discord embed limits when names are long', async () => {
   const store = new Store(':memory:');
   // Twenty-five bills, each naming eight people, comfortably exceeds 4096
   // characters if nothing trims it.
@@ -882,20 +871,21 @@ test('e2e: history stays within Discord message limits when names are long', asy
 
   const run = makeInteraction({ caller: ALICE, integers: { count: 25 } });
   await history.execute(run.interaction, store);
-  const content = historyContent(run.replies[0]!);
+  const data = run.replies[0]!.embeds![0]!.data;
+  const description = data['description'] as string;
   assert.ok(
-    content.length <= 2000,
-    `message content was ${content.length} characters, over Discord's limit`,
+    description.length <= 4096,
+    `embed description was ${description.length} characters, over Discord's limit`,
   );
-  assert.match(content, /bill number 24/, 'the newest entry is kept');
-  assert.match(content, /did not fit/, 'the drop is reported, not silent');
+  assert.match(description, /bill number 24/, 'the newest entry is kept');
+  assert.match(replyText(run.replies[0]!), /did not fit/, 'the drop is reported, not silent');
 
   // Whatever was trimmed for length must still be reachable, so Older starts
   // after what was actually shown rather than after what was fetched.
-  const oldest = content.match(/bill number (\d+)/g)!.at(-1)!;
+  const oldest = description.match(/bill number (\d+)/g)!.at(-1)!;
   const older = makeButtonClick(buttonNamed(run.replies[0]!, 'Older').custom_id);
   await history.handleButton(older.interaction, store);
-  const next = historyContent(older.updates[0]!);
+  const next = replyText(older.updates[0]!);
   assert.doesNotMatch(next, new RegExp(`${oldest} `), 'the next page does not repeat an entry');
   assert.match(next, /bill number \d+/, 'and it is not blank either');
   store.close();
@@ -934,62 +924,6 @@ test('e2e: the subtext names the logger even when they are the payer', async () 
   // Unconditional, unlike the old format: as subtext it costs a glance, and
   // omitting it would make its presence elsewhere read as an accusation.
   assert.match(replyText(run.replies[0]!), /-# <t:\d+:R> - Logged by <@100>$/m);
-  store.close();
-});
-
-test('e2e: the listing is message content, since subtext does not render in an embed', async () => {
-  const store = new Store(':memory:');
-  const b = makeInteraction({
-    caller: ALICE,
-    strings: { amount: '10', with: '<@200>', description: 'Trader Joes' },
-  });
-  await bill.execute(b.interaction, store);
-
-  const run = makeInteraction({ caller: ALICE });
-  await history.execute(run.interaction, store);
-  const reply = run.replies[0]!;
-
-  // Discord renders `-#` subtext and `##` headings only in message content. Inside
-  // an embed the subtext line comes out the same size as the body, which is the
-  // whole reason this is not an embed.
-  assert.ok(reply.content, 'sent as content');
-  assert.equal(reply.embeds, undefined, 'not as an embed');
-  assert.match(reply.content, /^-# /m, 'the subtext line survives');
-  assert.match(reply.content, /^## /m, 'and so does the date heading');
-  store.close();
-});
-
-test('e2e: a history listing never pings the people named in it', async () => {
-  const store = new Store(':memory:');
-  // Two bills against a page size of one, so there is an Older button to click:
-  // a single page shows no buttons at all, by design.
-  for (const description of ['Trader Joes', 'Molly Tea']) {
-    const b = makeInteraction({
-      caller: ALICE,
-      strings: { amount: '10', with: '<@200> <@300>', description },
-    });
-    await bill.execute(b.interaction, store);
-  }
-
-  const run = makeInteraction({ caller: ALICE, integers: { count: 1 } });
-  await history.execute(run.interaction, store);
-
-  // In message content a mention notifies unless suppressed, and the listing is
-  // made of mentions. Without this, paging would re-notify everyone per click.
-  assert.match(run.replies[0]!.content!, /<@200>/, 'people are still named');
-  assert.deepEqual(
-    run.replies[0]!.allowedMentions,
-    { parse: [] },
-    'mentions are rendered but suppressed',
-  );
-
-  const older = makeButtonClick(buttonNamed(run.replies[0]!, 'Older').custom_id);
-  await history.handleButton(older.interaction, store);
-  assert.deepEqual(
-    older.updates[0]!.allowedMentions,
-    { parse: [] },
-    'paging must not notify either',
-  );
   store.close();
 });
 
@@ -1102,14 +1036,15 @@ test('e2e: a heading is never left with no entries under it', async () => {
 
   const run = makeInteraction({ caller: ALICE, integers: { count: 25 } });
   await history.execute(run.interaction, store);
-  const content = historyContent(run.replies[0]!);
+  const description = run.replies[0]!.embeds![0]!.data['description'] as string;
 
-  assert.ok(content.length <= 2000, `over the message limit at ${content.length}`);
+  assert.ok(description.length <= 4096, `over the embed limit at ${description.length}`);
+  assert.doesNotMatch(description, /## [\d/]+$/, 'a heading is never the last thing shown');
   // Every heading has an amount line after it.
-  const headings = content.match(/^## .+$/gm) ?? [];
+  const headings = description.match(/^## .+$/gm) ?? [];
   assert.ok(headings.length > 0);
   for (const h of headings) {
-    const after = content.slice(content.indexOf(h) + h.length);
+    const after = description.slice(description.indexOf(h) + h.length);
     assert.match(after, /^\n \*\*\$/, `heading ${h} has no entry under it`);
   }
   store.close();

@@ -154,18 +154,9 @@ so each distinct share gets its own line rather than one figure that would be
 wrong for somebody.
 
 Very large groups name the first eight and summarise the rest as `and N more`, and
-a long listing is trimmed from the oldest end to stay inside Discord's message
-limit rather than being rejected outright. A date heading is never left stranded
-with nothing under it: entries are appended whole, heading included.
-
-The listing is sent as ordinary message content rather than as an embed, because
-`-#` subtext and `##` headings are only rendered in content - inside an embed the
-subtext comes out the same size as everything else, which defeats the point of
-separating the provenance from the amount. The cost is a 2000-character budget in
-place of an embed's 4096, so a full page of 25 bills in a large group trims sooner.
-Content also renders mentions as real pings, so the listing explicitly suppresses
-them: it is made of mentions by design, and paging would otherwise notify everyone
-named on every click.
+a long listing is trimmed from the oldest end to stay inside Discord's embed limit
+rather than being rejected outright. A date heading is never left stranded with
+nothing under it: entries are appended whole, heading included.
 
 **Timezone.** Grouping by calendar day forces a choice of zone, because an entry
 logged at 6pm in California is already the next day in UTC. Unlike the relative
@@ -300,7 +291,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 149 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 147 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

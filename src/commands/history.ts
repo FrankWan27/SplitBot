@@ -1,5 +1,6 @@
 import {
   SlashCommandBuilder,
+  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -17,28 +18,12 @@ const MAX_COUNT = 25;
 /**
  * How many participants to name on one bill before summarising the rest. A
  * mention costs about 21 characters, so a large group would otherwise push a
- * listing of 25 bills past Discord's message limit on its own.
+ * listing of 25 bills past Discord's embed limit on its own.
  */
 const MAX_NAMES = 8;
 
-/**
- * Discord rejects a message whose content exceeds this.
- *
- * The listing is sent as message content rather than as an embed because `-#`
- * subtext and `##` headings are only rendered in content - inside an embed the
- * subtext line comes out the same size as everything else, which defeats the
- * point of separating provenance from the amount. The cost is this 2000-character
- * budget in place of an embed's 4096, so a full page of 25 bills in a large group
- * now trims sooner.
- */
-const MAX_CONTENT = 2000;
-
-/**
- * Nothing in a history listing should notify anyone. It is full of mentions by
- * design, and in message content - unlike in an embed - a mention pings unless
- * suppressed. Paging would otherwise re-notify everyone on every click.
- */
-const NO_PINGS = { parse: [] as const };
+/** Discord rejects an embed whose description exceeds this. */
+const MAX_DESCRIPTION = 4096;
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -169,14 +154,14 @@ export function parsePageId(customId: string): PageRequest | null {
   };
 }
 
-/** One page of history, ready to be sent or to replace an existing message. */
-interface Page {
-  content: string;
+/** Builds the embed and buttons for one page. */
+function buildPage(
+  req: PageRequest,
+  store: Store,
+): {
+  embeds: EmbedBuilder[];
   components: ActionRowBuilder<ButtonBuilder>[];
-  allowedMentions: typeof NO_PINGS;
-}
-
-function buildPage(req: PageRequest, store: Store): Page {
+} {
   const { entries, hasMore } = store.recentEntries({
     guildId: req.guildId,
     userId: req.focusId ?? undefined,
@@ -189,18 +174,19 @@ function buildPage(req: PageRequest, store: Store): Page {
   if (entries.length === 0) {
     // Reachable on the first page of an empty ledger, and also by paging to an
     // offset whose entries were removed in between clicks.
-    const empty =
-      req.offset > 0
-        ? `**${title}**\nNo more entries. Page back to see earlier ones.`
-        : req.focusId
-          ? `**Nothing logged yet**\nNo bills or payments involving <@${req.focusId}> yet.`
-          : '**Nothing logged yet**\nNo bills or payments have been logged in this server yet. ' +
-            'Start with `/bill`.';
-    return {
-      content: empty,
-      components: buttonRows(req, { hasMore: false, shown: 0 }),
-      allowedMentions: NO_PINGS,
-    };
+    const empty = new EmbedBuilder().setColor(0x5865f2);
+    if (req.offset > 0) {
+      empty.setTitle(title).setDescription('No more entries. Page back to see earlier ones.');
+    } else {
+      empty
+        .setTitle('Nothing logged yet')
+        .setDescription(
+          req.focusId
+            ? `No bills or payments involving <@${req.focusId}> yet.`
+            : 'No bills or payments have been logged in this server yet. Start with `/bill`.',
+        );
+    }
+    return { embeds: [empty], components: buttonRows(req, { hasMore: false, shown: 0 }) };
   }
 
   // Entries are grouped under a date heading, which means an entry's rendered
@@ -220,28 +206,17 @@ function buildPage(req: PageRequest, store: Store): Page {
     blocks.push(heading + describe(entry));
   }
 
-  // The heading and the footer share the message's character budget with the
-  // entries, so they are measured rather than assumed to fit.
-  const header = `**${title}**`;
-  const first = req.offset + 1;
-
   // Naming every participant makes an entry far longer than a count did, so 25
-  // bills in a big group can exceed Discord's message limit. Drop from the oldest
+  // bills in a big group can exceed Discord's embed limit. Drop from the oldest
   // end until it fits: sending a short listing beats the API rejecting the lot.
-  // The footer's own length is reserved up front, since it grows when entries are
-  // dropped and must not be what pushes the message over.
-  // Reserved against the longest footer this page could produce: the
-  // "did not fit" variant, with the largest offsets and drop count in play.
-  const longestFooter = footer(first, first + req.limit, true, true, req.limit).length;
-  const budget = MAX_CONTENT - header.length - longestFooter - 2;
   const rendered: string[] = [];
   let length = 0;
   for (const block of blocks) {
     const added = length === 0 ? block.length : length + 2 + block.length;
-    if (added > budget) {
-      // A single entry can exceed the budget by itself if its description is
-      // enormous. Truncate rather than reply with nothing at all.
-      if (rendered.length === 0) rendered.push(block.slice(0, Math.max(budget - 1, 0)) + '…');
+    if (added > MAX_DESCRIPTION) {
+      // A single entry can exceed the limit by itself if its description is
+      // enormous. Truncate rather than reply with an empty embed.
+      if (rendered.length === 0) rendered.push(block.slice(0, MAX_DESCRIPTION - 1) + '…');
       break;
     }
     rendered.push(block);
@@ -249,32 +224,26 @@ function buildPage(req: PageRequest, store: Store): Page {
   }
   const dropped = entries.length - rendered.length;
 
-  const content = [
-    header,
-    rendered.join('\n\n'),
-    footer(first, req.offset + rendered.length, hasMore, dropped > 0, dropped),
-  ].join('\n');
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(title)
+    .setDescription(rendered.join('\n\n'));
+
+  const first = req.offset + 1;
+  const last = req.offset + rendered.length;
+  const range = `Showing ${first}-${last}`;
+  if (dropped > 0) {
+    embed.setFooter({ text: `${range} · ${dropped} more did not fit on this page` });
+  } else {
+    embed.setFooter({ text: hasMore ? `${range} · more older entries` : range });
+  }
 
   // Anything dropped for length must still be reachable, so the next page starts
   // after what was actually shown rather than after what was fetched.
   return {
-    content,
+    embeds: [embed],
     components: buttonRows(req, { hasMore: hasMore || dropped > 0, shown: rendered.length }),
-    allowedMentions: NO_PINGS,
   };
-}
-
-/** The range line closing a page, as subtext so it does not compete with entries. */
-function footer(
-  first: number,
-  last: number,
-  hasMore: boolean,
-  anyDropped: boolean,
-  dropped = 0,
-): string {
-  const range = `Showing ${first}-${last}`;
-  if (anyDropped) return `-# ${range} · ${dropped} more did not fit on this page`;
-  return `-# ${hasMore ? `${range} · more older entries` : range}`;
 }
 
 function buttonRows(

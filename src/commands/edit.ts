@@ -200,7 +200,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0xd9a13b)
-    .setTitle(`Edited #${id}`)
+    .setTitle(`✏️ Edited #${id}`)
     .setDescription(
       changes.length > 0
         ? changes.join('\n')

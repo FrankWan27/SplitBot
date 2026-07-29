@@ -205,7 +205,7 @@ function buildPage(
     includeVoided: req.showDeleted,
   });
 
-  const base = req.focusLabel ? `History for ${req.focusLabel}` : 'Recent history';
+  const base = req.focusLabel ? `🕓 History for ${req.focusLabel}` : '🕓 Recent history';
   // Stated in the title, since a struck-through entry is easy to miss and a
   // listing that includes deleted ones does not add up against `/balances`.
   const title = req.showDeleted ? `${base} (including deleted)` : base;
@@ -218,7 +218,7 @@ function buildPage(
       empty.setTitle(title).setDescription('No more entries. Page back to see earlier ones.');
     } else {
       empty
-        .setTitle('Nothing logged yet')
+        .setTitle('🕓 Nothing logged yet')
         .setDescription(
           req.focusId
             ? `No bills or payments involving <@${req.focusId}> yet.`

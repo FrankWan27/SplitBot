@@ -44,7 +44,7 @@ export async function execute(
       embeds: [
         new EmbedBuilder()
           .setColor(0x4f9d69)
-          .setTitle('All settled up')
+          .setTitle('✅ All settled up')
           .setDescription(
             focus
               ? `<@${focus.id}> does not owe anyone and is not owed anything.`
@@ -65,7 +65,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0xd98e04)
-    .setTitle(focus ? `Balances for ${focus.displayName}` : 'Outstanding balances')
+    .setTitle(focus ? `💰 Balances for ${focus.displayName}` : '💰 Outstanding balances')
     .setDescription(lines.join('\n'));
 
   if (focus) {

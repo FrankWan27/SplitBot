@@ -3,6 +3,10 @@
 A Discord bot for splitting bills between friends.
 Log what someone paid, split it evenly across whoever was there, see who owes who, and record payments when people square up.
 
+Every reply is titled with an emoji for its category, so a busy channel is
+skimmable: 💳 a bill, 💰 balances, ✅ a settled payment, 🕓 history, and ✏️ 🗑️ ♻️ for
+editing, deleting, and restoring.
+
 ## Commands
 
 ### `/bill`
@@ -126,6 +130,8 @@ amount, what it was for, who paid and for how many, who borrowed what, then the
 time in italics:
 
 ```
+🕓 Recent history
+
 ## __07/27__
  `#31` **$21.45 - Trader Joes**
 Paid by @franky for 3 people.
@@ -408,7 +414,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 167 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 168 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

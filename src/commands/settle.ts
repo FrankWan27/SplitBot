@@ -76,7 +76,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0x4f9d69)
-    .setTitle('Payment recorded')
+    .setTitle('✅ Payment settled')
     .setDescription(`<@${from.id}> paid <@${to.id}> **${formatCents(cents)}**.`);
 
   // Report the resulting state plainly, including the awkward cases: paying more

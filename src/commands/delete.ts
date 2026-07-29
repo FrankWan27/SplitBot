@@ -70,7 +70,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0xb4453c)
-    .setTitle(`Deleted #${id}`)
+    .setTitle(`🗑️ Deleted #${id}`)
     .setDescription(
       `${summarise(deleted)}\n\nBalances have been adjusted as though it never happened. ` +
         `It is kept in the log, so \`/restore id:${id}\` undoes this.`,

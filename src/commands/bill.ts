@@ -136,7 +136,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0x4f9d69)
-    .setTitle(description ? `Bill: ${description}` : 'Bill logged')
+    .setTitle(description ? `💳 Bill: ${description}` : '💳 Bill logged')
     .setDescription(
       `**${formatCents(totalCents)}** paid by <@${payer.id}>, split ${
         participants.length

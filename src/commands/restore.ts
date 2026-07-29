@@ -44,7 +44,7 @@ export async function execute(
 
   const embed = new EmbedBuilder()
     .setColor(0x4f9d69)
-    .setTitle(`Restored #${id}`)
+    .setTitle(`♻️ Restored #${id}`)
     .setDescription(`${summarise(restored)}\n\nIts balances are back in effect.`);
 
   await interaction.reply({ embeds: [embed] });

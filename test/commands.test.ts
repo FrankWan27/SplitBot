@@ -1783,3 +1783,65 @@ test('a paging button written before show_deleted existed still works', () => {
   assert.equal(parsed?.focusLabel, 'bob');
   assert.equal(parsed?.showDeleted, false, 'absent means off, never on');
 });
+
+test('e2e: each kind of reply is prefixed with its own emoji', async () => {
+  const store = new Store(':memory:');
+  // The emoji is the fastest way to tell what a reply is when several are
+  // scrolling past in a busy channel, so one is pinned per category here rather
+  // than left to drift as titles get reworded.
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+  const seen = new Map<string, string>();
+
+  const runs: [string, () => Promise<Reply>][] = [
+    ['bill', async () => {
+      const r = makeInteraction({ caller: ALICE, strings: { amount: '5', with: '<@300>', description: 'coffee' } });
+      await bill.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['balances', async () => {
+      const r = makeInteraction({ caller: ALICE });
+      await balances.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['history', async () => {
+      const r = makeInteraction({ caller: ALICE });
+      await history.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['edit', async () => {
+      const r = makeInteraction({ caller: ALICE, integers: { id }, strings: { amount: '30' } });
+      await edit.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['settle', async () => {
+      const r = makeInteraction({ caller: BOB, users: { to: ALICE } });
+      await settle.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['delete', async () => {
+      const r = makeInteraction({ caller: ALICE, integers: { id } });
+      await del.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+    ['restore', async () => {
+      const r = makeInteraction({ caller: ALICE, integers: { id } });
+      await restore.execute(r.interaction, store);
+      return r.replies[0]!;
+    }],
+  ];
+
+  for (const [name, run] of runs) {
+    const title = (await run()).embeds?.[0]?.data['title'];
+    assert.equal(typeof title, 'string', `${name} should reply with a titled embed`);
+    seen.set(name, title as string);
+  }
+
+  assert.match(seen.get('bill')!, /^💳 /);
+  assert.match(seen.get('balances')!, /^💰 /);
+  assert.match(seen.get('history')!, /^🕓 /);
+  assert.match(seen.get('settle')!, /^✅ Payment settled/);
+  assert.match(seen.get('edit')!, /^✏️ /);
+  assert.match(seen.get('delete')!, /^🗑️ /);
+  assert.match(seen.get('restore')!, /^♻️ /);
+  store.close();
+});

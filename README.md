@@ -112,34 +112,41 @@ totals, so the history is what tells you *what* a debt was for.
 |---|---|---|
 | `user` | no | Only entries involving this person |
 | `count` | no | How many to show, 1-25; defaults to 5 |
+| `show_deleted` | no | Also list deleted entries, struck through; defaults to no |
 
 ```
-/history                  # last 5 entries in this server
-/history user:@bob        # everything bob was involved in
-/history count:25         # a longer stretch
+/history                     # last 5 entries in this server
+/history user:@bob           # everything bob was involved in
+/history count:25            # a longer stretch
+/history show_deleted:true   # including deleted ones
 ```
 
-Entries are grouped under a `MM/DD` date heading, and each one reads as the
-amount and what it was for, who paid and for how many, who borrowed what, then the
+Entries are grouped under a `MM/DD` date heading, and each one reads as its id and
+amount, what it was for, who paid and for how many, who borrowed what, then the
 time in italics:
 
 ```
 ## __07/27__
- **$21.45 - Trader Joes**
+ `#31` **$21.45 - Trader Joes**
 Paid by @franky for 3 people.
 @mikula @pepega8359 borrowed $7.15.
 _4 hours ago_
 
- **$12.32 - Molly Tea**
+ `#30` **$12.32 - Molly Tea**
 Paid by @pepega8359 for 3 people.
 @mikula @franky borrowed $4.10.
 _4 hours ago - Logged by @franky_
 
 ## __07/26__
- **$7.15**
+ `#29` **$7.15**
 @mikula paid @franky.
 _yesterday_
 ```
+
+The `#31` is the entry's id, which is what `/edit`, `/delete`, and `/restore` take.
+It is shown in code formatting because it is a token to be retyped rather than
+prose, and on every entry rather than on request, since needing it is the whole
+reason to look a bill up.
 
 The date heading is underlined as well as headed, so it reads as a divider between
 days rather than as a title belonging to the entry directly beneath it. Italics are
@@ -213,6 +220,90 @@ and when it happened. The listing shows and orders by the latter; the former sta
 in the ledger, so a backdated entry remains identifiable and the audit trail is
 intact. Entries on the same date keep their insertion order.
 
+### `/edit`
+
+Change a bill that was already logged, without deleting and re-entering it.
+
+| Option | Required | Meaning |
+|---|---|---|
+| `id` | yes | The id shown next to the entry in `/history`, e.g. `31` |
+| `amount` | no | New total |
+| `description` | no | New description |
+| `with` | no | Replace who it was split with |
+| `payer` | no | Change who paid |
+| `include_payer` | no | Whether the payer shares the cost |
+| `date` | no | Change when it happened |
+
+```
+/edit id:31 amount:24.50            # the receipt was more than you remembered
+/edit id:31 description:Trader Joes # you typed it in a hurry
+/edit id:31 with:@bob @carol        # carol was there too
+/edit id:31 payer:@bob              # bob paid, not you
+```
+
+Every option except `id` is optional and an omitted one keeps its stored value, so
+you can fix a description without restating the split. Naming nothing to change is
+refused rather than silently stamping the entry as edited.
+
+The reply lists what actually changed, old value to new, and then who owes what
+now - the second being the part that matters, since an edit moves real balances.
+
+**An edit only re-splits when the split actually changed.** Changing a description
+leaves the stored shares exactly as they were. This matters because an uneven total
+leaves one person a penny short, and re-splitting would reshuffle who carries that
+penny - moving a cent of real debt between two people as a side effect of fixing a
+typo.
+
+Changing `payer` alone keeps the same people in the split. Handing a three-way bill
+to someone who was already in it still leaves three people sharing it; the debts
+just point at the new payer instead.
+
+Payments cannot be edited - a payment is two people and one amount, and there is
+nothing to change that `/delete` plus a corrected `/settle` does not say more
+clearly. The refusal names both commands.
+
+### `/delete`
+
+Delete a bill or payment and undo its effect on balances.
+
+| Option | Required | Meaning |
+|---|---|---|
+| `id` | yes | The id shown next to the entry in `/history` |
+
+```
+/delete id:31
+```
+
+The row is kept rather than removed. It is marked deleted, hidden from `/history`
+by default, and its effect on balances is reversed - so the ledger stays an
+append-only record of what happened, including the fact that somebody deleted
+something. `/history show_deleted:true` lists deleted entries struck through, with
+who deleted them.
+
+Deleting something twice is refused and points at `/restore`, rather than reversing
+the same balances a second time.
+
+### `/restore`
+
+Bring back a deleted entry, re-applying the balances it accounted for.
+
+| Option | Required | Meaning |
+|---|---|---|
+| `id` | yes | The id of the deleted entry |
+
+```
+/restore id:31
+```
+
+This is what makes an accidental `/delete` recoverable, rather than something to be
+patched over with an offsetting bill. A restore reproduces the original balances
+penny for penny, because it re-applies the *stored* shares rather than re-splitting
+the total - so the spare penny lands back on whoever had it.
+
+**Anyone in the server can edit, delete, and restore anything.** The bot is for a
+group of friends who already trust each other with the ledger, and the log records
+who did what, which is the check that actually fits that setting.
+
 ## Setup
 
 ### 1. Create the Discord application
@@ -272,6 +363,16 @@ what `/history` reads. Balances are never computed from it - they are maintained
 directly - so the two are independent: a display bug in the history cannot
 corrupt a balance, and the log stays a faithful record of what was entered.
 
+`/edit`, `/delete`, and `/restore` keep that append-only property. A delete marks
+the row voided rather than removing it, and an edit stamps it as edited, so the log
+never loses the fact that something changed. Both reverse the entry's effect on
+balances *explicitly*: because balances are maintained rather than derived, there is
+no recomputation to fall back on. That reversal is the same arithmetic that recorded
+the entry with the sign flipped - one helper serves both directions, so an undo can
+never drift away from the corresponding apply. An edit is then two reversals, out
+with the old and in with the new, which makes a changed payer fall out for free
+rather than needing a special case of its own.
+
 Opening the database brings an older file up to the current schema by adding any
 columns it is missing. New columns are nullable with no default, which is what
 makes this safe to apply to rows already written, and re-opening is a no-op.
@@ -307,7 +408,7 @@ how the tests pin a draw and assert exact shares.
 ## Development
 
 ```bash
-npm test     # 147 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 167 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 
@@ -329,9 +430,6 @@ addition later:
 
 - **Uneven and share-based splits** - every split is even. Itemised or
   percentage splits would need a different `with` syntax.
-- **Undo** - `/history` shows what was logged, but there is no command to reverse
-  an entry, so a mistyped bill has to be corrected with an offsetting one. Each
-  entry has a stable id, so `/undo <id>` is the natural next addition.
 - **Debt simplification** - A→B→C chains are not collapsed into the minimum set
   of payments.
 - **Currencies** - amounts are formatted as USD. Nothing in the storage layer
@@ -341,8 +439,9 @@ addition later:
 
 - Ledgers are per-server. The same people in two different Discord servers keep
   entirely separate balances.
-- Anyone in the server can log a bill or record a payment on anyone else's
-  behalf. This suits a group of friends who trust each other; it is not an
-  access-controlled system.
+- Anyone in the server can log a bill, record a payment, or edit and delete any
+  entry, on anyone else's behalf. This suits a group of friends who trust each
+  other; it is not an access-controlled system. Every entry records who logged it
+  and who last changed it, which is the check that fits that setting.
 - Bots cannot owe or be owed money, and people outside the server are rejected
   rather than silently skipped.

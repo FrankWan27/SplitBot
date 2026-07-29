@@ -38,6 +38,11 @@ export const data = guildOnly(
         .setDescription(`How many entries to show (1-${MAX_COUNT}, default ${DEFAULT_COUNT})`)
         .setMinValue(1)
         .setMaxValue(MAX_COUNT),
+    )
+    .addBooleanOption((o) =>
+      o
+        .setName('show_deleted')
+        .setDescription('Also show deleted entries, struck through (default: no)'),
     ),
 );
 
@@ -78,38 +83,47 @@ function borrowedLines(entry: BillEntry): string[] {
   });
 }
 
+/**
+ * The italic closing line: when it happened, plus whatever has been done to it
+ * since. The logger is named only when it is not the payer - usually the two are
+ * the same person and "Logged by" would restate the line above it, so mentioning
+ * it only on the exception is what makes the exception visible at a glance.
+ */
+function provenance(entry: LedgerEntry, payerId: string): string {
+  const parts = [timestamp(entryWhen(entry))];
+  if (entry.createdBy !== payerId) parts.push(`Logged by <@${entry.createdBy}>`);
+  if (entry.editedBy) parts.push(`edited by <@${entry.editedBy}>`);
+  if (entry.voidedBy) parts.push(`deleted by <@${entry.voidedBy}>`);
+  return `_${parts.join(' - ')}_`;
+}
+
 function describe(entry: LedgerEntry): string {
-  // Backdated bills report when they happened, not when they were typed, which
-  // is also the order the listing is sorted in.
-  const when = timestamp(entryWhen(entry));
+  // The id is what `/edit` and `/delete` take, so it has to be visible on every
+  // entry. In code formatting: it is a token to be retyped, not prose.
+  const tag = `\`#${entry.id}\``;
+
+  // A deleted entry is struck through, so it cannot be mistaken for one still in
+  // effect, while its amount stays legible enough to decide whether to restore it.
+  const headline = (body: string): string =>
+    entry.voidedAt ? ` ${tag} ~~**${body}**~~` : ` ${tag} **${body}**`;
 
   if (entry.kind === 'payment') {
     return [
-      ` **${formatCents(entry.cents)}**`,
+      headline(formatCents(entry.cents)),
       `<@${entry.fromId}> paid <@${entry.toId}>.`,
-      `_${when}_`,
+      provenance(entry, entry.fromId),
     ].join('\n');
   }
 
   // Counts everyone the bill was divided between, including the payer when they
   // took a share, which is what makes the per-person figure below add up.
   const people = entry.splits.length;
-  const lines = [
-    ` **${formatCents(entry.totalCents)} - ${entry.description ?? 'no description'}**`,
+  return [
+    headline(`${formatCents(entry.totalCents)} - ${entry.description ?? 'no description'}`),
     `Paid by <@${entry.payerId}> for ${people} ${people === 1 ? 'person' : 'people'}.`,
     ...borrowedLines(entry),
-  ];
-
-  // Italic, so the provenance reads as an aside rather than competing with the
-  // amount. `-#` subtext would be smaller still, but Discord only parses it in
-  // message content - inside an embed description it prints the `-#` literally.
-  //
-  // The logger is named only when it is not the payer. Usually the two are the
-  // same person and "Logged by" restates the line above it; naming them only on
-  // the exception is what makes the exception visible at a glance.
-  const onBehalf = entry.createdBy !== entry.payerId;
-  lines.push(onBehalf ? `_${when} - Logged by <@${entry.createdBy}>_` : `_${when}_`);
-  return lines.join('\n');
+    provenance(entry, entry.payerId),
+  ].join('\n');
 }
 
 /** What a page of history needs to render itself and its buttons. */
@@ -121,12 +135,19 @@ export interface PageRequest {
   focusLabel: string | null;
   limit: number;
   offset: number;
+  /** Whether deleted entries are included, which paging has to carry across. */
+  showDeleted: boolean;
 }
 
 /**
  * Paging state is encoded in the button's own custom id rather than held in
  * memory, so buttons keep working across a bot restart and nothing has to be
- * expired. Format: `history:<offset>:<limit>:<focusId or ->:<focusLabel>`.
+ * expired. Format:
+ *
+ *     history:<offset>:<limit>:<focusId or ->:<d or ->:<focusLabel>
+ *
+ * The `d` flag carries `show_deleted`, so paging a listing that includes deleted
+ * entries does not silently drop them on the second page.
  */
 const CUSTOM_ID_PREFIX = 'history';
 
@@ -134,9 +155,10 @@ const CUSTOM_ID_PREFIX = 'history';
 const MAX_CUSTOM_ID = 100;
 
 export function encodePageId(req: PageRequest, offset: number): string {
-  const head = `${CUSTOM_ID_PREFIX}:${offset}:${req.limit}:${req.focusId ?? '-'}:`;
+  const flag = req.showDeleted ? 'd' : '-';
+  const head = `${CUSTOM_ID_PREFIX}:${offset}:${req.limit}:${req.focusId ?? '-'}:${flag}:`;
   // A display name can contain a colon, so the label goes last and is parsed as
-  // "everything after the fourth colon". Truncated to fit Discord's id limit.
+  // "everything after the fifth colon". Truncated to fit Discord's id limit.
   return head + (req.focusLabel ?? '').slice(0, MAX_CUSTOM_ID - head.length);
 }
 
@@ -150,13 +172,20 @@ export function parsePageId(customId: string): PageRequest | null {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_COUNT) return null;
 
   const focusId = parts[3] === '-' ? null : parts[3]!;
-  const label = parts.slice(4).join(':');
+
+  // Buttons on messages sent before the flag existed have the label at index 4.
+  // Reading it as a label in that case keeps those buttons working rather than
+  // leaving them dead, at the cost of misreading a label of exactly `d` or `-`.
+  const flagged = parts.length >= 6 && (parts[4] === 'd' || parts[4] === '-');
+  const label = parts.slice(flagged ? 5 : 4).join(':');
+
   return {
     guildId: '',
     focusId,
     focusLabel: label === '' ? null : label,
     limit,
     offset,
+    showDeleted: flagged && parts[4] === 'd',
   };
 }
 
@@ -173,9 +202,13 @@ function buildPage(
     userId: req.focusId ?? undefined,
     limit: req.limit,
     offset: req.offset,
+    includeVoided: req.showDeleted,
   });
 
-  const title = req.focusLabel ? `History for ${req.focusLabel}` : 'Recent history';
+  const base = req.focusLabel ? `History for ${req.focusLabel}` : 'Recent history';
+  // Stated in the title, since a struck-through entry is easy to miss and a
+  // listing that includes deleted ones does not add up against `/balances`.
+  const title = req.showDeleted ? `${base} (including deleted)` : base;
 
   if (entries.length === 0) {
     // Reachable on the first page of an empty ledger, and also by paging to an
@@ -298,6 +331,7 @@ export async function execute(
       focusLabel: focus?.displayName ?? null,
       limit: interaction.options.getInteger('count') ?? DEFAULT_COUNT,
       offset: 0,
+      showDeleted: interaction.options.getBoolean('show_deleted') ?? false,
     },
     store,
   );

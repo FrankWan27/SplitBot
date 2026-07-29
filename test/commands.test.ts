@@ -6,6 +6,9 @@ import * as bill from '../src/commands/bill.js';
 import * as balances from '../src/commands/balances.js';
 import * as settle from '../src/commands/settle.js';
 import * as history from '../src/commands/history.js';
+import * as edit from '../src/commands/edit.js';
+import * as del from '../src/commands/delete.js';
+import * as restore from '../src/commands/restore.js';
 import { buttonHandlerFor } from '../src/commands/index.js';
 import type { ButtonInteraction, ChatInputCommandInteraction } from 'discord.js';
 
@@ -571,7 +574,7 @@ test('e2e: an empty ledger reports all settled', async () => {
 
 test('e2e: commands used in a DM explain that a server is needed', async () => {
   const store = new Store(':memory:');
-  for (const cmd of [bill, balances, settle, history]) {
+  for (const cmd of [bill, balances, settle, history, edit, del, restore]) {
     const run = makeInteraction({
       caller: ALICE,
       inGuild: false,
@@ -588,7 +591,7 @@ test('e2e: a server the bot is not a member of gives the invite fix', async () =
   // carries a guild id the bot cannot resolve. That needs a different fix from a
   // DM, so it must not produce the same message.
   const store = new Store(':memory:');
-  for (const cmd of [bill, balances, settle, history]) {
+  for (const cmd of [bill, balances, settle, history, edit, del, restore]) {
     const run = makeInteraction({
       caller: ALICE,
       inGuild: false,
@@ -710,7 +713,7 @@ test('e2e: a bill renders as amount, payer with headcount, borrowers, then prove
   // the time in italics. Alice both paid and logged it, so no "Logged by".
   assert.match(
     text,
-    /^## __\d\d\/\d\d__\n \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n<@200> <@300> borrowed \$3\.00\.\n_<t:\d+:R>_$/m,
+    /^## __\d\d\/\d\d__\n `#1` \*\*\$9\.00 - Trader Joes\*\*\nPaid by <@100> for 3 people\.\n<@200> <@300> borrowed \$3\.00\.\n_<t:\d+:R>_$/m,
   );
   store.close();
 });
@@ -1052,7 +1055,7 @@ test('e2e: a heading is never left with no entries under it', async () => {
   assert.ok(headings.length > 0);
   for (const h of headings) {
     const after = description.slice(description.indexOf(h) + h.length);
-    assert.match(after, /^\n \*\*\$/, `heading ${h} has no entry under it`);
+    assert.match(after, /^\n `#\d+` \*\*\$/, `heading ${h} has no entry under it`);
   }
   store.close();
 });
@@ -1342,7 +1345,14 @@ test('a button id stays inside Discord limits even with a long display name', ()
   // The label is truncated to fit, but the offset and limit ahead of it must
   // survive intact or paging would break for anyone with a long nickname.
   const id = history.encodePageId(
-    { guildId: GUILD, focusId: BOB.id, focusLabel: longName, limit: 10, offset: 0 },
+    {
+      guildId: GUILD,
+      focusId: BOB.id,
+      focusLabel: longName,
+      limit: 10,
+      offset: 0,
+      showDeleted: false,
+    },
     20,
   );
   assert.ok(id.length <= 100, `custom id was ${id.length} chars`);
@@ -1356,7 +1366,14 @@ test('a button id stays inside Discord limits even with a long display name', ()
 
 test('a display name containing a colon does not corrupt the paging state', () => {
   const id = history.encodePageId(
-    { guildId: GUILD, focusId: '200', focusLabel: 'bob: the third', limit: 5, offset: 15 },
+    {
+      guildId: GUILD,
+      focusId: '200',
+      focusLabel: 'bob: the third',
+      limit: 5,
+      offset: 15,
+      showDeleted: false,
+    },
     15,
   );
   const parsed = history.parsePageId(id);
@@ -1369,7 +1386,7 @@ test('all commands are registered as guild-only, server-installed', async () => 
   // Declaring this on the command stops Discord offering it in DMs at all,
   // rather than relying on the runtime guard to catch it after the fact.
   const { InteractionContextType, ApplicationIntegrationType } = await import('discord.js');
-  for (const cmd of [bill, balances, settle, history]) {
+  for (const cmd of [bill, balances, settle, history, edit, del, restore]) {
     const json = cmd.data.toJSON() as {
       name: string;
       contexts?: number[];
@@ -1378,4 +1395,391 @@ test('all commands are registered as guild-only, server-installed', async () => 
     assert.deepEqual(json.contexts, [InteractionContextType.Guild], `${json.name} contexts`);
     assert.deepEqual(json.integration_types, [ApplicationIntegrationType.GuildInstall]);
   }
+});
+
+/**
+ * Editing and deleting are the only operations that reach backwards into the
+ * ledger, so these lean hardest on the balances afterwards rather than on the
+ * wording of the reply: a wrong reversal is silent, and a stale balance is the
+ * only place it shows up.
+ */
+
+/** Logs one bill and returns the id it was given, which is what /edit takes. */
+async function logBill(
+  store: Store,
+  strings: Record<string, string>,
+  caller: FakeUser = ALICE,
+  users: Record<string, FakeUser> = {},
+): Promise<number> {
+  const run = makeInteraction({ caller, strings, users });
+  await bill.execute(run.interaction, store);
+  return store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+}
+
+test('e2e: deleting a bill undoes exactly the balances it created', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '30', with: '<@200> <@300>', description: 'dinner' });
+  const keep = await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  assert.notEqual(keep, id, 'each entry gets its own id');
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1500);
+
+  const run = makeInteraction({ caller: ALICE, integers: { id } });
+  await del.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Deleted #1/);
+  assert.match(text, /dinner/, 'says what was deleted, not just its id');
+  assert.match(text, new RegExp(`/restore id:${id}`), 'says how to undo it');
+
+  // Only the deleted bill's shares come off; the other bill is untouched.
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 500);
+  assert.equal(store.owedBetween(GUILD, CAROL.id, ALICE.id), 0);
+  store.close();
+});
+
+test('e2e: a deleted bill is hidden from history until show_deleted asks for it', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '30', with: '<@200>', description: 'dinner' });
+  await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  await del.execute(makeInteraction({ caller: BOB, integers: { id } }).interaction, store);
+
+  const hidden = makeInteraction({ caller: ALICE });
+  await history.execute(hidden.interaction, store);
+  const hiddenText = replyText(hidden.replies[0]!);
+  assert.doesNotMatch(hiddenText, /dinner/, 'a deleted bill is not listed by default');
+  assert.match(hiddenText, /coffee/);
+  assert.doesNotMatch(hiddenText, /including deleted/);
+
+  const shown = makeInteraction({ caller: ALICE, booleans: { show_deleted: true } });
+  await history.execute(shown.interaction, store);
+  const shownText = replyText(shown.replies[0]!);
+  // Struck through, and the title says so - a listing including deleted entries
+  // does not add up against /balances, so it has to announce itself.
+  assert.match(shownText, /including deleted/);
+  assert.match(shownText, /~~\*\*\$30\.00 - dinner\*\*~~/);
+  assert.match(shownText, /deleted by <@200>/, 'names who deleted it');
+  store.close();
+});
+
+test('e2e: restoring reproduces the balances the delete removed, exactly', async () => {
+  const store = new Store(':memory:');
+  // An uneven split, so a reversal that re-split instead of restoring the stored
+  // shares would land the spare penny somewhere else and be caught here.
+  const id = await logBill(store, { amount: '10', with: '<@200> <@300>', description: 'dinner' });
+  const before = store.allBalances(GUILD);
+  const splitsBefore = (store.entryById(GUILD, id) as BillEntry).splits;
+
+  await del.execute(makeInteraction({ caller: ALICE, integers: { id } }).interaction, store);
+  assert.deepEqual(store.allBalances(GUILD), [], 'nothing owed once it is deleted');
+
+  const run = makeInteraction({ caller: CAROL, integers: { id } });
+  await restore.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /Restored #1/);
+  assert.match(replyText(run.replies[0]!), /dinner/);
+
+  assert.deepEqual(store.allBalances(GUILD), before, 'restored penny-for-penny');
+  assert.deepEqual((store.entryById(GUILD, id) as BillEntry).splits, splitsBefore);
+  assert.equal(store.entryById(GUILD, id)?.voidedAt, null, 'no longer marked deleted');
+  store.close();
+});
+
+test('e2e: deleting a payment puts the debt back', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+  await settle.execute(makeInteraction({ caller: BOB, users: { to: ALICE } }).interaction, store);
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 0);
+
+  const paymentId = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+  const run = makeInteraction({ caller: BOB, integers: { id: paymentId } });
+  await del.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /from <@200> to <@100>/);
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000, 'the debt is owed again');
+  store.close();
+});
+
+test('e2e: deleting the same entry twice is refused and points at restore', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+  await del.execute(makeInteraction({ caller: ALICE, integers: { id } }).interaction, store);
+
+  const second = makeInteraction({ caller: ALICE, integers: { id } });
+  await assert.rejects(() => del.execute(second.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /already deleted/);
+    assert.match(err.message, /\/restore id:1/);
+    return true;
+  });
+  // The refusal must not have reversed the balances a second time.
+  assert.deepEqual(store.allBalances(GUILD), []);
+  store.close();
+});
+
+test('e2e: restoring an entry that is not deleted says there is nothing to do', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+  const before = store.allBalances(GUILD);
+
+  const run = makeInteraction({ caller: ALICE, integers: { id } });
+  await assert.rejects(() => restore.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /is not deleted/);
+    return true;
+  });
+  assert.deepEqual(store.allBalances(GUILD), before, 'balances must not double up');
+  store.close();
+});
+
+test('e2e: an id that does not exist is refused by every command that takes one', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  for (const cmd of [del, restore, edit]) {
+    const run = makeInteraction({
+      caller: ALICE,
+      integers: { id: 999 },
+      strings: { amount: '5' },
+    });
+    await assert.rejects(() => cmd.execute(run.interaction, store), (err: unknown) => {
+      assert.ok(err instanceof UserError, `${cmd.data.name} should raise a UserError`);
+      assert.match(err.message, /no entry `#999`/);
+      return true;
+    });
+  }
+  assert.deepEqual(store.allBalances(GUILD), [{ creditor: '100', debtor: '200', cents: 500 }]);
+  store.close();
+});
+
+test('e2e: editing the amount re-splits it and moves the balances with it', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '30', with: '<@200> <@300>', description: 'dinner' });
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000);
+
+  const run = makeInteraction({ caller: BOB, integers: { id }, strings: { amount: '60' } });
+  await edit.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Edited #1/);
+  assert.match(text, /\$30\.00 → \*\*\$60\.00\*\*/);
+  assert.match(text, /<@200> owes \$20\.00/);
+
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 2000);
+  assert.equal(store.owedBetween(GUILD, CAROL.id, ALICE.id), 2000);
+  store.close();
+});
+
+test('e2e: editing only the description leaves the leftover penny where it was', async () => {
+  const store = new Store(':memory:');
+  // $10 three ways is 334/333/333, so a needless re-split would move a real cent
+  // of debt between two people without saying so.
+  const id = await logBill(store, { amount: '10', with: '<@200> <@300>', description: 'dinner' });
+  const before = store.allBalances(GUILD);
+  const splitsBefore = (store.entryById(GUILD, id) as BillEntry).splits;
+
+  // Repeated, because the spare penny is assigned at random: a single edit that
+  // wrongly re-split would land on the same person by chance often enough to look
+  // fine, and drift that only appears on the fourth edit is still real drift.
+  for (const description of ['thai food', 'thai', 'thai food again', 'dinner', 'supper']) {
+    const run = makeInteraction({ caller: ALICE, integers: { id }, strings: { description } });
+    await edit.execute(run.interaction, store);
+    assert.deepEqual(
+      (store.entryById(GUILD, id) as BillEntry).splits,
+      splitsBefore,
+      `the shares must be untouched after renaming to ${description}`,
+    );
+    assert.deepEqual(store.allBalances(GUILD), before);
+  }
+  store.close();
+});
+
+test('e2e: changing who paid keeps the same people in the split', async () => {
+  const store = new Store(':memory:');
+  // Alice paid and shared it, so bob is already a participant. Handing the bill
+  // to bob must not drop alice: it is still three people sharing $30.
+  const id = await logBill(store, {
+    amount: '30',
+    with: '<@200> <@300>',
+    description: 'dinner',
+  });
+
+  const run = makeInteraction({ caller: ALICE, integers: { id }, users: { payer: BOB } });
+  await edit.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Paid by: <@100> → \*\*<@200>\*\*/);
+  assert.doesNotMatch(text, /Split between/, 'the split membership did not change');
+
+  const after = store.entryById(GUILD, id) as BillEntry;
+  assert.equal(after.payerId, BOB.id);
+  assert.deepEqual(
+    after.splits.map((s) => s.userId).sort(),
+    [ALICE.id, BOB.id, CAROL.id],
+    'all three still share it',
+  );
+  // The debts now point at bob, and alice owes her own share rather than none.
+  assert.equal(store.owedBetween(GUILD, ALICE.id, BOB.id), 1000);
+  assert.equal(store.owedBetween(GUILD, CAROL.id, BOB.id), 1000);
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), -1000, 'the old debt is gone');
+  store.close();
+});
+
+test('e2e: replacing the participants re-splits between the new ones only', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '30', with: '<@200> <@300>', description: 'dinner' });
+
+  const run = makeInteraction({ caller: ALICE, integers: { id }, strings: { with: '<@400>' } });
+  await edit.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /Split between: 3 → \*\*2 people\*\*/);
+
+  assert.equal(store.owedBetween(GUILD, DAVE.id, ALICE.id), 1500);
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 0, 'bob is out of it entirely');
+  assert.equal(store.owedBetween(GUILD, CAROL.id, ALICE.id), 0);
+  store.close();
+});
+
+test('e2e: excluding the payer on an edit charges the others in full', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '30', with: '<@200> <@300>', description: 'dinner' });
+
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { id },
+    booleans: { include_payer: false },
+  });
+  await edit.execute(run.interaction, store);
+
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1500);
+  assert.equal(store.owedBetween(GUILD, CAROL.id, ALICE.id), 1500);
+  const after = store.entryById(GUILD, id) as BillEntry;
+  assert.deepEqual(after.splits.map((s) => s.userId).sort(), [BOB.id, CAROL.id]);
+  store.close();
+});
+
+test('e2e: an edit naming nothing to change is refused', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  const run = makeInteraction({ caller: ALICE, integers: { id } });
+  await assert.rejects(() => edit.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /at least one thing to change/);
+    return true;
+  });
+  assert.equal(store.entryById(GUILD, id)?.editedAt, null, 'nothing was stamped as edited');
+  store.close();
+});
+
+test('e2e: editing a payment is refused with the two commands that do work', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+  await settle.execute(makeInteraction({ caller: BOB, users: { to: ALICE } }).interaction, store);
+  const paymentId = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+
+  const run = makeInteraction({
+    caller: BOB,
+    integers: { id: paymentId },
+    strings: { amount: '5' },
+  });
+  await assert.rejects(() => edit.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /is a payment, not a bill/);
+    assert.match(err.message, /\/delete id:2/);
+    assert.match(err.message, /\/settle/);
+    return true;
+  });
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 0, 'the payment still stands');
+  store.close();
+});
+
+test('e2e: editing a deleted entry is refused until it is restored', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+  await del.execute(makeInteraction({ caller: ALICE, integers: { id } }).interaction, store);
+
+  const run = makeInteraction({ caller: ALICE, integers: { id }, strings: { amount: '20' } });
+  await assert.rejects(() => edit.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /is deleted/);
+    assert.match(err.message, /\/restore id:1/);
+    return true;
+  });
+  // Editing a deleted entry must not resurrect its balances by the back door.
+  assert.deepEqual(store.allBalances(GUILD), []);
+  store.close();
+});
+
+test('e2e: an edited entry says so in history, and names the editor', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+  await edit.execute(
+    makeInteraction({ caller: CAROL, integers: { id }, strings: { amount: '20' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /edited by <@300>/);
+  assert.match(text, /\$20\.00 - dinner/, 'the new amount is what is listed');
+  assert.doesNotMatch(text, /\$10\.00 - dinner/);
+  store.close();
+});
+
+test('e2e: an edit that changes nothing is reported as such rather than faked', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+  const before = store.allBalances(GUILD);
+
+  // Restating the stored values: accepted, but the reply must not claim a change.
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { id },
+    strings: { amount: '10', description: 'dinner' },
+  });
+  await edit.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /Nothing actually changed/);
+  assert.deepEqual(store.allBalances(GUILD), before);
+  store.close();
+});
+
+test('e2e: every entry in history carries the id that /delete takes', async () => {
+  const store = new Store(':memory:');
+  const first = await logBill(store, { amount: '10', with: '<@200>', description: 'one' });
+  const second = await logBill(store, { amount: '20', with: '<@300>', description: 'two' });
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  // Reading the ids back out of the rendering is what proves they are usable:
+  // a listing that showed the wrong id would send /delete at the wrong entry.
+  const shown = [...text.matchAll(/`#(\d+)`/g)].map((m) => Number(m[1]));
+  assert.deepEqual(shown.sort(), [first, second].sort());
+  store.close();
+});
+
+test('paging keeps show_deleted on, so page two does not silently drop them', async () => {
+  const store = new Store(':memory:');
+  for (let i = 0; i < 4; i += 1) {
+    const id = await logBill(store, { amount: '10', with: '<@200>', description: `bill ${i}` });
+    if (i === 3) {
+      await del.execute(makeInteraction({ caller: ALICE, integers: { id } }).interaction, store);
+    }
+  }
+
+  const run = makeInteraction({ caller: ALICE, integers: { count: 2 }, booleans: { show_deleted: true } });
+  await history.execute(run.interaction, store);
+  const older = buttonNamed(run.replies[0]!, 'Older');
+  assert.equal(history.parsePageId(older.custom_id)?.showDeleted, true);
+
+  const click = makeButtonClick(older.custom_id);
+  await history.handleButton(click.interaction, store);
+  assert.match(replyText(click.updates[0]!), /including deleted/, 'page two still includes them');
+  store.close();
+});
+
+test('a paging button written before show_deleted existed still works', () => {
+  // Old messages carry ids with the label where the flag now sits. Those buttons
+  // have to keep paging rather than going dead after a deploy.
+  const parsed = history.parsePageId('history:10:5:200:bob');
+  assert.equal(parsed?.offset, 10);
+  assert.equal(parsed?.limit, 5);
+  assert.equal(parsed?.focusId, '200');
+  assert.equal(parsed?.focusLabel, 'bob');
+  assert.equal(parsed?.showDeleted, false, 'absent means off, never on');
 });

@@ -8,13 +8,16 @@ import * as bill from './bill.js';
 import * as balances from './balances.js';
 import * as settle from './settle.js';
 import * as history from './history.js';
+import * as edit from './edit.js';
+import * as del from './delete.js';
+import * as restore from './restore.js';
 
 export interface Command {
   data: SlashCommandOptionsOnlyBuilder;
   execute: (interaction: ChatInputCommandInteraction, store: Store) => Promise<void>;
 }
 
-export const commands: Command[] = [bill, balances, settle, history];
+export const commands: Command[] = [bill, balances, settle, history, edit, del, restore];
 
 export const commandsByName = new Map(commands.map((c) => [c.data.name, c]));
 

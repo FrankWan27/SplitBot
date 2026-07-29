@@ -18,6 +18,12 @@ import { dirname } from 'node:path';
  *
  * `entries` is an append-only audit log of every bill and payment. Nothing reads
  * it to compute balances - it exists so a disputed balance can be reconstructed.
+ *
+ * Editing and deleting keep that append-only property. A delete marks the row
+ * voided rather than removing it, and an edit stamps the row as edited, so the
+ * log never loses the fact that something was changed. Both reverse the entry's
+ * effect on balances explicitly, since balances are maintained rather than
+ * derived: there is no recomputation to fall back on.
  */
 
 export interface PairBalance {
@@ -34,29 +40,39 @@ export interface BillSplit {
   shareCents: number;
 }
 
-/** A logged bill, with the shares it was split into. */
-export interface BillEntry {
-  kind: 'bill';
+/**
+ * Bookkeeping every entry carries, whatever its kind: who logged it, and whether
+ * it has since been changed or deleted.
+ */
+interface EntryMeta {
   id: number;
+  createdBy: string;
+  createdAt: string;
+  /** Set once the entry has been deleted; the row itself is kept. */
+  voidedAt: string | null;
+  voidedBy: string | null;
+  /** Set once the entry has been changed, so a listing can say so. */
+  editedAt: string | null;
+  editedBy: string | null;
+}
+
+/** A logged bill, with the shares it was split into. */
+export interface BillEntry extends EntryMeta {
+  kind: 'bill';
   description: string | null;
   payerId: string;
   totalCents: number;
   splits: BillSplit[];
-  createdBy: string;
-  createdAt: string;
   /** When it happened, if it was backdated. Null means "same as createdAt". */
   occurredAt: string | null;
 }
 
 /** A logged payment from one person to another. */
-export interface PaymentEntry {
+export interface PaymentEntry extends EntryMeta {
   kind: 'payment';
-  id: number;
   fromId: string;
   toId: string;
   cents: number;
-  createdBy: string;
-  createdAt: string;
 }
 
 export type LedgerEntry = BillEntry | PaymentEntry;
@@ -70,6 +86,31 @@ export function entryWhen(entry: LedgerEntry): string {
 }
 
 /**
+ * One row of `entries` as SQLite hands it back. The nullable-and-optional
+ * columns are the ones added by migration: an older database returns them as
+ * undefined rather than null.
+ */
+interface EntryRow {
+  id: number;
+  kind: string;
+  description: string | null;
+  payer_id: string;
+  total_cents: number;
+  created_by: string;
+  created_at: string;
+  occurred_at?: string | null;
+  voided_at?: string | null;
+  voided_by?: string | null;
+  edited_at?: string | null;
+  edited_by?: string | null;
+  detail_json: string;
+}
+
+/** Every column of `entries` that `toLedgerEntry` reads. */
+const ENTRY_COLUMNS = `id, kind, description, payer_id, total_cents, created_by, created_at,
+                       occurred_at, voided_at, voided_by, edited_at, edited_by, detail_json`;
+
+/**
  * Rebuild a typed entry from its stored row.
  *
  * `detail_json` holds a different shape per kind, and it is data we wrote
@@ -78,17 +119,7 @@ export function entryWhen(entry: LedgerEntry): string {
  * degrades to empty splits - the amount and payer, which live in real columns,
  * are still correct and still displayable.
  */
-function toLedgerEntry(row: {
-  id: number;
-  kind: string;
-  description: string | null;
-  payer_id: string;
-  total_cents: number;
-  created_by: string;
-  created_at: string;
-  occurred_at: string | null;
-  detail_json: string;
-}): LedgerEntry {
+function toLedgerEntry(row: EntryRow): LedgerEntry {
   let detail: unknown;
   try {
     detail = JSON.parse(row.detail_json);
@@ -96,17 +127,26 @@ function toLedgerEntry(row: {
     detail = null;
   }
 
+  // A database written before these columns existed reports them as undefined.
+  const meta = {
+    id: row.id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    voidedAt: row.voided_at ?? null,
+    voidedBy: row.voided_by ?? null,
+    editedAt: row.edited_at ?? null,
+    editedBy: row.edited_by ?? null,
+  };
+
   if (row.kind === 'payment') {
     const d = (detail ?? {}) as { from?: unknown; to?: unknown };
     return {
+      ...meta,
       kind: 'payment',
-      id: row.id,
       // payer_id is the payer for both kinds, so it is the reliable fallback.
       fromId: typeof d.from === 'string' ? d.from : row.payer_id,
       toId: typeof d.to === 'string' ? d.to : '',
       cents: row.total_cents,
-      createdBy: row.created_by,
-      createdAt: row.created_at,
     };
   }
 
@@ -121,16 +161,28 @@ function toLedgerEntry(row: {
     : [];
 
   return {
+    ...meta,
     kind: 'bill',
-    id: row.id,
     description: row.description,
     payerId: row.payer_id,
     totalCents: row.total_cents,
     splits,
-    createdBy: row.created_by,
-    createdAt: row.created_at,
-    // A database written before this column existed reports it as undefined.
     occurredAt: row.occurred_at ?? null,
+  };
+}
+
+/**
+ * The same entry with every amount negated, so that reversing it applies it.
+ *
+ * Lets one `reverseEffect` serve both directions rather than having an apply and
+ * an undo that could drift apart.
+ */
+function negated(entry: LedgerEntry): LedgerEntry {
+  if (entry.kind === 'payment') return { ...entry, cents: -entry.cents };
+  return {
+    ...entry,
+    totalCents: -entry.totalCents,
+    splits: entry.splits.map((s) => ({ ...s, shareCents: -s.shareCents })),
   };
 }
 
@@ -169,6 +221,14 @@ CREATE TABLE IF NOT EXISTS entries (
   -- Null on a normal entry, so created_at remains the record of what was entered
   -- when and a backdated entry stays identifiable.
   occurred_at   TEXT,
+  -- Deleting marks the row instead of removing it, so the log stays append-only
+  -- and an accidental delete is recoverable. Null means the entry is live.
+  voided_at     TEXT,
+  voided_by     TEXT,
+  -- Set when an entry has been changed, so a listing can say it was edited
+  -- without having to store the superseded values.
+  edited_at     TEXT,
+  edited_by     TEXT,
   detail_json   TEXT    NOT NULL
 ) STRICT;
 `;
@@ -191,6 +251,10 @@ CREATE INDEX IF NOT EXISTS idx_entries_guild_when
  */
 const ADDED_COLUMNS: Array<{ table: string; column: string; type: string }> = [
   { table: 'entries', column: 'occurred_at', type: 'TEXT' },
+  { table: 'entries', column: 'voided_at', type: 'TEXT' },
+  { table: 'entries', column: 'voided_by', type: 'TEXT' },
+  { table: 'entries', column: 'edited_at', type: 'TEXT' },
+  { table: 'entries', column: 'edited_by', type: 'TEXT' },
 ];
 
 export class Store {
@@ -365,6 +429,144 @@ export class Store {
     });
   }
 
+  /** One entry by id, or null if no such entry exists in this guild. */
+  entryById(guildId: string, id: number): LedgerEntry | null {
+    const row = this.db
+      .prepare(`SELECT ${ENTRY_COLUMNS} FROM entries WHERE guild_id = ? AND id = ?`)
+      .get(guildId, id) as EntryRow | undefined;
+    return row ? toLedgerEntry(row) : null;
+  }
+
+  /**
+   * Undo an entry's effect on balances. Must be called inside a transaction.
+   *
+   * Balances are maintained rather than derived, so there is no recomputation to
+   * fall back on - the effect has to be reversed by applying it backwards. This is
+   * the same arithmetic that recorded it, with the sign flipped, which is what
+   * keeps the two from drifting apart.
+   */
+  private reverseEffect(guildId: string, entry: LedgerEntry): void {
+    if (entry.kind === 'payment') {
+      // recordPayment applied -cents in the (to, from) direction; undo it.
+      this.applyDebt(guildId, entry.toId, entry.fromId, entry.cents);
+      return;
+    }
+    for (const { userId, shareCents } of entry.splits) {
+      if (userId === entry.payerId || shareCents === 0) continue;
+      this.applyDebt(guildId, entry.payerId, userId, -shareCents);
+    }
+  }
+
+  /**
+   * Delete an entry: reverse its effect on balances and mark the row voided.
+   *
+   * The row is kept rather than removed, so the audit log still records that the
+   * entry existed and that somebody deleted it. Returns the entry as it stood, or
+   * null if it does not exist or was already deleted - both of which the caller
+   * has to report differently, so they are distinguished by `entryById`.
+   */
+  voidEntry(args: {
+    guildId: string;
+    id: number;
+    voidedBy: string;
+    voidedAt: string;
+  }): LedgerEntry | null {
+    return this.transact(() => {
+      const entry = this.entryById(args.guildId, args.id);
+      if (!entry || entry.voidedAt !== null) return null;
+
+      this.reverseEffect(args.guildId, entry);
+      this.db
+        .prepare('UPDATE entries SET voided_at = ?, voided_by = ? WHERE guild_id = ? AND id = ?')
+        .run(args.voidedAt, args.voidedBy, args.guildId, args.id);
+      return entry;
+    });
+  }
+
+  /**
+   * Restore a deleted entry, re-applying the balances it had accounted for.
+   *
+   * The counterpart to `voidEntry`, which is what makes an accidental delete
+   * recoverable rather than something to be corrected with an offsetting bill.
+   */
+  restoreEntry(args: { guildId: string; id: number }): LedgerEntry | null {
+    return this.transact(() => {
+      const entry = this.entryById(args.guildId, args.id);
+      if (!entry || entry.voidedAt === null) return null;
+
+      // Re-applying is reversing the reversal, so the same helper serves both
+      // directions and cannot disagree with itself.
+      this.reverseEffect(args.guildId, negated(entry));
+      this.db
+        .prepare(
+          'UPDATE entries SET voided_at = NULL, voided_by = NULL WHERE guild_id = ? AND id = ?',
+        )
+        .run(args.guildId, args.id);
+      return entry;
+    });
+  }
+
+  /**
+   * Change a bill in place: back out the old shares, apply the new ones, and
+   * stamp the row as edited.
+   *
+   * Everything is optional and an omitted field keeps its stored value, so a
+   * caller can change only the description without restating the split. Returns
+   * the bill as it stood before the edit, so the caller can show what changed.
+   */
+  editBill(args: {
+    guildId: string;
+    id: number;
+    editedBy: string;
+    editedAt: string;
+    payerId?: string;
+    totalCents?: number;
+    splits?: BillSplit[];
+    description?: string | null;
+    occurredAt?: string | null;
+  }): BillEntry | null {
+    return this.transact(() => {
+      const before = this.entryById(args.guildId, args.id);
+      if (!before || before.kind !== 'bill' || before.voidedAt !== null) return null;
+
+      const after: BillEntry = {
+        ...before,
+        payerId: args.payerId ?? before.payerId,
+        totalCents: args.totalCents ?? before.totalCents,
+        splits: args.splits ?? before.splits,
+        description: args.description !== undefined ? args.description : before.description,
+        occurredAt: args.occurredAt !== undefined ? args.occurredAt : before.occurredAt,
+      };
+
+      // Out with the old, in with the new. Done as two reversals rather than a
+      // computed delta: the arithmetic is then identical to recording the bill
+      // twice, and a changed payer is handled without a special case.
+      this.reverseEffect(args.guildId, before);
+      this.reverseEffect(args.guildId, negated(after));
+
+      this.db
+        .prepare(
+          `UPDATE entries
+              SET description = ?, payer_id = ?, total_cents = ?, occurred_at = ?,
+                  detail_json = ?, edited_at = ?, edited_by = ?
+            WHERE guild_id = ? AND id = ?`,
+        )
+        .run(
+          after.description,
+          after.payerId,
+          after.totalCents,
+          after.occurredAt,
+          JSON.stringify(after.splits),
+          args.editedAt,
+          args.editedBy,
+          args.guildId,
+          args.id,
+        );
+
+      return before;
+    });
+  }
+
   /** How much `debtor` currently owes `creditor`; negative means the reverse. */
   owedBetween(guildId: string, debtor: string, creditor: string): number {
     const [lo, hi] = debtor < creditor ? [debtor, creditor] : [creditor, debtor];
@@ -401,6 +603,8 @@ export class Store {
     userId?: string;
     limit: number;
     offset?: number;
+    /** Include deleted entries, which are hidden by default. */
+    includeVoided?: boolean;
   }): { entries: LedgerEntry[]; hasMore: boolean } {
     const offset = args.offset ?? 0;
     if (!Number.isInteger(offset) || offset < 0) {
@@ -409,22 +613,11 @@ export class Store {
 
     const rows = this.db
       .prepare(
-        `SELECT id, kind, description, payer_id, total_cents, created_by, created_at,
-                occurred_at, detail_json
+        `SELECT ${ENTRY_COLUMNS}
            FROM entries WHERE guild_id = ?
           ORDER BY COALESCE(occurred_at, created_at) DESC, id DESC`,
       )
-      .all(args.guildId) as Array<{
-      id: number;
-      kind: string;
-      description: string | null;
-      payer_id: string;
-      total_cents: number;
-      created_by: string;
-      created_at: string;
-      occurred_at: string | null;
-      detail_json: string;
-    }>;
+      .all(args.guildId) as unknown as EntryRow[];
 
     // The user filter cannot be expressed in SQL - it depends on the parsed JSON
     // splits - so matches are skipped here rather than with SQL OFFSET.
@@ -432,6 +625,9 @@ export class Store {
     let skipped = 0;
     for (const r of rows) {
       const entry = toLedgerEntry(r);
+      // Deleted entries no longer affect any balance, so showing them by default
+      // would invite reading a figure that is not in effect.
+      if (entry.voidedAt !== null && args.includeVoided !== true) continue;
       if (args.userId !== undefined && !entryInvolves(entry, args.userId)) continue;
       if (skipped < offset) {
         skipped++;

@@ -84,6 +84,9 @@ export interface PaymentEntry extends EntryMeta {
 
 export type LedgerEntry = BillEntry | PaymentEntry;
 
+/** Which kinds of entry a listing covers. Empty would list nothing, so it is not allowed. */
+export type EntryKind = LedgerEntry['kind'];
+
 /**
  * The outcome of a batch delete or restore.
  *
@@ -717,10 +720,18 @@ export class Store {
     offset?: number;
     /** Include deleted entries, which are hidden by default. */
     includeVoided?: boolean;
+    /** Which kinds to list. Omitted means every kind. */
+    kinds?: readonly EntryKind[];
   }): { entries: LedgerEntry[]; hasMore: boolean } {
     const offset = args.offset ?? 0;
     if (!Number.isInteger(offset) || offset < 0) {
       throw new Error(`recentEntries offset must be a non-negative integer, got ${offset}`);
+    }
+    // An empty list would return nothing while looking like "no filter", which is
+    // the kind of silent empty page that reads as data loss. Callers resolve their
+    // options to at least one kind before getting here.
+    if (args.kinds?.length === 0) {
+      throw new Error('recentEntries kinds must name at least one kind, or be omitted');
     }
 
     const rows = this.db
@@ -740,6 +751,7 @@ export class Store {
       // Deleted entries no longer affect any balance, so showing them by default
       // would invite reading a figure that is not in effect.
       if (entry.voidedAt !== null && args.includeVoided !== true) continue;
+      if (args.kinds !== undefined && !args.kinds.includes(entry.kind)) continue;
       if (args.userId !== undefined && !entryInvolves(entry, args.userId)) continue;
       if (skipped < offset) {
         skipped++;

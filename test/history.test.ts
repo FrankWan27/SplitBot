@@ -331,6 +331,118 @@ test('hasMore accounts for the user filter, not just raw row count', () => {
   s.close();
 });
 
+/**
+ * The `kinds` filter is what lets `/history` default to bills. These check it
+ * composes with the other filters rather than replacing them: an offset or a
+ * `hasMore` computed before the kind filter ran would page over rows the caller
+ * never asked to see.
+ */
+
+/** Records a payment at `createdAt`, so kind-filter tests can interleave them. */
+function payment(s: Store, createdAt: string, cents = 100): void {
+  s.recordPayment({ guildId: G, fromId: bob, toId: alice, cents, createdBy: bob, createdAt });
+}
+
+test('kinds narrows a listing to one kind of entry', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'a bill');
+  payment(s, '2026-01-02T00:00:00.000Z');
+
+  const bills = s.recentEntries({ guildId: G, limit: 10, kinds: ['bill'] });
+  assert.deepEqual(bills.entries.map((e) => e.kind), ['bill']);
+
+  const payments = s.recentEntries({ guildId: G, limit: 10, kinds: ['payment'] });
+  assert.deepEqual(payments.entries.map((e) => e.kind), ['payment']);
+
+  const both = s.recentEntries({ guildId: G, limit: 10, kinds: ['bill', 'payment'] });
+  assert.equal(both.entries.length, 2);
+  s.close();
+});
+
+test('omitting kinds lists every kind, so existing callers are unaffected', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'a bill');
+  payment(s, '2026-01-02T00:00:00.000Z');
+  assert.equal(s.recentEntries({ guildId: G, limit: 10 }).entries.length, 2);
+  s.close();
+});
+
+test('an empty kinds list is a programming error, not an empty listing', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob]);
+  // It would read as "no filter" at the call site while returning nothing, which
+  // is the kind of silent empty page that looks like data loss.
+  assert.throws(
+    () => s.recentEntries({ guildId: G, limit: 10, kinds: [] }),
+    /at least one kind/,
+  );
+  s.close();
+});
+
+test('offset skips only entries of the kinds asked for', () => {
+  const s = new Store(':memory:');
+  // Interleaved, so an offset applied before the kind filter would land wrong.
+  bill(s, alice, 1000, [alice, bob], 'bill 0');
+  payment(s, '2026-01-02T00:00:00.000Z');
+  bill(s, alice, 1000, [alice, bob], 'bill 1');
+  payment(s, '2026-01-04T00:00:00.000Z');
+
+  const page = s.recentEntries({ guildId: G, limit: 1, offset: 1, kinds: ['bill'] });
+  assert.deepEqual(
+    page.entries.map((e) => (e.kind === 'bill' ? e.description : 'payment')),
+    ['bill 0'],
+  );
+  s.close();
+});
+
+test('hasMore counts only the kinds asked for', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'the only bill');
+  for (let i = 0; i < 5; i++) payment(s, `2026-01-0${i + 2}T00:00:00.000Z`);
+
+  const r = s.recentEntries({ guildId: G, limit: 1, kinds: ['bill'] });
+  assert.equal(r.entries.length, 1);
+  assert.equal(r.hasMore, false, 'five payments are not older bills');
+  s.close();
+});
+
+test('the kind filter composes with the user filter', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, carol], 'carols bill');
+  bill(s, alice, 1000, [alice, bob], 'bobs bill');
+  payment(s, '2026-01-03T00:00:00.000Z');
+
+  const r = s.recentEntries({ guildId: G, userId: bob, limit: 10, kinds: ['bill'] });
+  assert.deepEqual(
+    r.entries.map((e) => (e.kind === 'bill' ? e.description : 'payment')),
+    ['bobs bill'],
+    'bob is in the payment too, but payments were not asked for',
+  );
+  s.close();
+});
+
+test('the kind filter composes with includeVoided', () => {
+  const s = new Store(':memory:');
+  bill(s, alice, 1000, [alice, bob], 'live bill');
+  bill(s, alice, 1000, [alice, bob], 'dead bill');
+  payment(s, '2026-01-03T00:00:00.000Z');
+  const dead = s.recentEntries({ guildId: G, limit: 10 }).entries.find(
+    (e) => e.kind === 'bill' && e.description === 'dead bill',
+  )!;
+  s.voidEntries({ guildId: G, ids: [dead.id], voidedBy: bob, voidedAt: '2026-01-04T00:00:00.000Z' });
+
+  const shown = s.recentEntries({ guildId: G, limit: 10, kinds: ['bill'], includeVoided: true });
+  assert.deepEqual(
+    shown.entries.map((e) => (e.kind === 'bill' ? e.description : 'payment')),
+    ['dead bill', 'live bill'],
+    'a deleted bill is still a bill',
+  );
+
+  const hidden = s.recentEntries({ guildId: G, limit: 10, kinds: ['bill'] });
+  assert.equal(hidden.entries.length, 1, 'and is still hidden by default');
+  s.close();
+});
+
 test('history is isolated per guild', () => {
   const s = new Store(':memory:');
   bill(s, alice, 1000, [alice, bob], 'in guild one');

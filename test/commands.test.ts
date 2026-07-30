@@ -908,14 +908,298 @@ test('e2e: history shows the description that was logged with the bill', async (
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /Recent history/);
+  assert.match(text, /Recent bills/, 'the default listing is bills only, and says so');
   assert.match(text, /dinner at Nopa/);
   assert.match(text, /\$42\.50/);
   assert.match(text, /Paid by <@100>/);
   store.close();
 });
 
-test('e2e: history lists newest first and includes payments', async () => {
+/**
+ * `/history` lists bills by default and payments only when asked. These lean on
+ * what each combination *excludes*, since a filter that quietly lets something
+ * through is the failure that matters - and on the title, because a listing that
+ * omits payments while calling itself "history" would read as an empty ledger.
+ */
+
+/** Logs one bill and one payment, so a filter has something of each kind to sort. */
+async function seedOneOfEach(store: Store): Promise<void> {
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'a bill' },
+    }).interaction,
+    store,
+  );
+  await settle.execute(
+    makeInteraction({ caller: BOB, users: { to: ALICE }, strings: { amount: '4' } }).interaction,
+    store,
+  );
+}
+
+test('e2e: history with no flags shows bills and leaves payments out', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  const run = makeInteraction({ caller: ALICE });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /a bill/);
+  assert.doesNotMatch(text, /paid <@100>/, 'a payment is not listed unless asked for');
+  // Calling a bills-only listing "history" would imply the payments were not
+  // there, rather than not looked for.
+  assert.match(text, /Recent bills/);
+  store.close();
+});
+
+test('e2e: payments:true shows payments instead of bills, not as well', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  const run = makeInteraction({ caller: ALICE, booleans: { payments: true } });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /paid <@100>/);
+  // Adding bills back would leave no way to ask for payments on their own.
+  assert.doesNotMatch(text, /a bill/, 'asking for payments means payments');
+  assert.match(text, /Recent payments/);
+  store.close();
+});
+
+test('e2e: both flags together show both kinds under the history title', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  const run = makeInteraction({ caller: ALICE, booleans: { bills: true, payments: true } });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /a bill/);
+  assert.match(text, /paid <@100>/);
+  assert.match(text, /Recent history/, 'covering everything is what earns the old title');
+  store.close();
+});
+
+test('e2e: bills:true is the same listing as the default', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  const explicit = makeInteraction({ caller: ALICE, booleans: { bills: true } });
+  await history.execute(explicit.interaction, store);
+  const implicit = makeInteraction({ caller: ALICE });
+  await history.execute(implicit.interaction, store);
+
+  assert.equal(replyText(explicit.replies[0]!), replyText(implicit.replies[0]!));
+  store.close();
+});
+
+test('e2e: asking for nothing is refused rather than showing an empty page', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  // An empty listing is indistinguishable from an empty ledger, so this has to be
+  // an error the user can act on rather than a blank reply. `bills:false` alone is
+  // the same request: rather than guess that they meant payments, say so - there
+  // is no reading of it under which the reply would have anything in it.
+  const cases: Record<string, boolean>[] = [{ bills: false }, { bills: false, payments: false }];
+  for (const booleans of cases) {
+    const run = makeInteraction({ caller: ALICE, booleans });
+    await assert.rejects(
+      () => history.execute(run.interaction, store),
+      (err: unknown) => {
+        assert.ok(err instanceof UserError);
+        assert.match(err.message, /show nothing/);
+        assert.match(err.message, /payments:true/, 'the error names the fix that fits');
+        return true;
+      },
+      JSON.stringify(booleans),
+    );
+  }
+  store.close();
+});
+
+test('e2e: a payments-only listing with nothing to show points back at the default', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'a bill' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, booleans: { payments: true } });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  // The ledger is not empty; the filter is what emptied the page, and saying so
+  // is what stops this reading as lost data.
+  assert.match(text, /No payments to show/, 'not "nothing logged yet" - there is a bill');
+  assert.match(text, /No payments have been logged/);
+  assert.match(text, /Bills are listed by default/);
+  store.close();
+});
+
+test('e2e: an empty ledger says nothing is logged, whatever the flags', async () => {
+  const store = new Store(':memory:');
+  // The bills-only default must not turn a brand-new server's greeting into the
+  // "a filter is hiding things" wording, which would be false here.
+  const cases: Record<string, boolean>[] = [{}, { payments: true }, { bills: true, payments: true }];
+  for (const booleans of cases) {
+    const run = makeInteraction({ caller: ALICE, booleans });
+    await history.execute(run.interaction, store);
+    const text = replyText(run.replies[0]!);
+    assert.match(text, /Nothing logged yet/, JSON.stringify(booleans));
+    assert.match(text, /Start with `\/bill`/, JSON.stringify(booleans));
+  }
+  store.close();
+});
+
+test('e2e: the kind filter survives a paging click', async () => {
+  const store = new Store(':memory:');
+  // Interleaved, so a lost filter shows up as a payment appearing on page two.
+  for (let i = 0; i < 3; i += 1) {
+    await bill.execute(
+      makeInteraction({
+        caller: ALICE,
+        strings: { amount: '20', with: '<@200>', description: `bill ${i}` },
+      }).interaction,
+      store,
+    );
+    await settle.execute(
+      makeInteraction({ caller: BOB, users: { to: ALICE }, strings: { amount: '1' } }).interaction,
+      store,
+    );
+  }
+
+  const run = makeInteraction({ caller: ALICE, integers: { count: 1 } });
+  await history.execute(run.interaction, store);
+  const first = run.replies[0]!;
+  assert.match(replyText(first), /bill 2/);
+
+  const older = buttonNamed(first, 'Older');
+  assert.deepEqual(history.parsePageId(older.custom_id)?.kinds, ['bill']);
+
+  const click = makeButtonClick(older.custom_id);
+  await history.handleButton(click.interaction, store);
+  const second = replyText(click.updates[0]!);
+  assert.match(second, /bill 1/, 'paging walks the filtered listing');
+  assert.doesNotMatch(second, /paid <@100>/, 'and does not pick up payments on the way');
+  assert.match(second, /Recent bills/);
+  store.close();
+});
+
+test('e2e: show_deleted and the kind filter both survive together', async () => {
+  const store = new Store(':memory:');
+  // Two filters on one id: encoding one over the other would drop the first.
+  await seedOneOfEach(store);
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '5', with: '<@200>', description: 'doomed' },
+    }).interaction,
+    store,
+  );
+  const doomed = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+  await del.execute(
+    makeInteraction({ caller: ALICE, integers: { id: doomed } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { count: 1 },
+    booleans: { show_deleted: true, payments: true, bills: true },
+  });
+  await history.execute(run.interaction, store);
+  const parsed = history.parsePageId(buttonNamed(run.replies[0]!, 'Older').custom_id);
+  assert.equal(parsed?.showDeleted, true);
+  assert.deepEqual(parsed?.kinds, ['bill', 'payment']);
+  store.close();
+});
+
+test('a paging button written before the kind flags existed still lists everything', () => {
+  // Old messages carry ids with only the `d` flag, or with the label where the
+  // flags now sit. Those buttons page a listing that is already on screen, so
+  // narrowing what they show would be a surprise; they keep covering both kinds.
+  for (const id of ['history:10:5:200:d:bob', 'history:10:5:200:-:bob', 'history:10:5:200:bob']) {
+    const parsed = history.parsePageId(id);
+    assert.deepEqual(parsed?.kinds, ['bill', 'payment'], id);
+    assert.equal(parsed?.focusLabel, 'bob', id);
+  }
+});
+
+test('the flags field round-trips every combination of filters', () => {
+  for (const showDeleted of [false, true]) {
+    for (const kinds of [['bill'], ['payment'], ['bill', 'payment']] as const) {
+      const id = history.encodePageId(
+        {
+          guildId: GUILD,
+          focusId: BOB.id,
+          focusLabel: 'bob',
+          limit: 5,
+          offset: 0,
+          showDeleted,
+          kinds,
+        },
+        10,
+      );
+      const parsed = history.parsePageId(id);
+      const label = `${showDeleted} ${kinds.join('+')}`;
+      assert.equal(parsed?.showDeleted, showDeleted, label);
+      assert.deepEqual(parsed?.kinds, [...kinds], label);
+      assert.equal(parsed?.focusLabel, 'bob', label);
+      assert.equal(parsed?.offset, 10, label);
+    }
+  }
+});
+
+test('a display name spelt only from the flag letters is not read as flags', () => {
+  // "bdp" is a plausible nickname and a valid flags string. The field it sits in
+  // is what decides, so a six-part id always reads index 4 as the flags.
+  const id = history.encodePageId(
+    {
+      guildId: GUILD,
+      focusId: BOB.id,
+      focusLabel: 'bdp',
+      limit: 5,
+      offset: 0,
+      showDeleted: false,
+      kinds: ['bill'],
+    },
+    0,
+  );
+  const parsed = history.parsePageId(id);
+  assert.equal(parsed?.focusLabel, 'bdp');
+  assert.deepEqual(parsed?.kinds, ['bill'], 'the label did not leak into the flags');
+  assert.equal(parsed?.showDeleted, false);
+});
+
+test('history offers bills and payments as optional booleans', async () => {
+  const { ApplicationCommandOptionType } = await import('discord.js');
+  const json = history.data.toJSON() as {
+    description: string;
+    options?: Array<{ name: string; type: number; required?: boolean; description: string }>;
+  };
+  const byName = new Map((json.options ?? []).map((o) => [o.name, o]));
+
+  for (const name of ['bills', 'payments']) {
+    assert.equal(byName.get(name)?.type, ApplicationCommandOptionType.Boolean, name);
+    assert.notEqual(byName.get(name)?.required, true, `${name} must be optional`);
+  }
+  // The picker text is the only documentation most users will read, so it has to
+  // state which way each flag defaults.
+  assert.match(byName.get('bills')!.description, /default: yes/);
+  assert.match(byName.get('payments')!.description, /default: no/);
+  assert.doesNotMatch(
+    json.description,
+    /payments/,
+    'the command blurb should not promise payments it does not show by default',
+  );
+});
+
+test('e2e: history with both kinds lists newest first', async () => {
   const store = new Store(':memory:');
   const b = makeInteraction({
     caller: ALICE,
@@ -925,7 +1209,7 @@ test('e2e: history lists newest first and includes payments', async () => {
   const p = makeInteraction({ caller: BOB, users: { to: ALICE } });
   await settle.execute(p.interaction, store);
 
-  const run = makeInteraction({ caller: ALICE });
+  const run = makeInteraction({ caller: ALICE, booleans: { payments: true, bills: true } });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, /<@200> paid <@100>/);
@@ -1105,7 +1389,7 @@ test('e2e: a payment renders as amount, who paid whom, then provenance', async (
   const p = makeInteraction({ caller: BOB, users: { to: ALICE } });
   await settle.execute(p.interaction, store);
 
-  const run = makeInteraction({ caller: ALICE });
+  const run = makeInteraction({ caller: ALICE, booleans: { payments: true, bills: true } });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -1439,7 +1723,7 @@ test('e2e: history filtered by user covers bills they were merely charged for', 
   const run = makeInteraction({ caller: BOB, users: { user: BOB } });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
-  assert.match(text, /History for bob/);
+  assert.match(text, /Bills for bob/);
   assert.match(text, /bob involved/);
   assert.doesNotMatch(text, /bob absent/);
   store.close();
@@ -1487,11 +1771,11 @@ test('e2e: an empty history says so instead of showing a blank embed', async () 
   const store = new Store(':memory:');
   const run = makeInteraction({ caller: ALICE });
   await history.execute(run.interaction, store);
-  assert.match(replyText(run.replies[0]!), /No bills or payments have been logged/);
+  assert.match(replyText(run.replies[0]!), /No bills have been logged/);
 
   const focused = makeInteraction({ caller: ALICE, users: { user: BOB } });
   await history.execute(focused.interaction, store);
-  assert.match(replyText(focused.replies[0]!), /No bills or payments involving <@200>/);
+  assert.match(replyText(focused.replies[0]!), /No bills involving <@200>/);
   store.close();
 });
 
@@ -1581,13 +1865,13 @@ test('e2e: paging keeps the user filter and the count it started with', async ()
   const run = makeInteraction({ caller: ALICE, users: { user: BOB }, integers: { count: 1 } });
   await history.execute(run.interaction, store);
   const first = run.replies[0]!;
-  assert.match(replyText(first), /History for bob/);
+  assert.match(replyText(first), /Bills for bob/);
   assert.match(replyText(first), /entry 2/);
 
   const older = makeButtonClick(buttonNamed(first, 'Older').custom_id);
   await history.handleButton(older.interaction, store);
   const second = older.updates[0]!;
-  assert.match(replyText(second), /History for bob/, 'the filter survives the click');
+  assert.match(replyText(second), /Bills for bob/, 'the filter survives the click');
   assert.match(replyText(second), /entry 0/);
   assert.doesNotMatch(replyText(second), /entry 1|entry 3/);
   assert.match(replyText(second), /Showing 2-2/, 'count of 1 is still in force');
@@ -1642,6 +1926,7 @@ test('a button id stays inside Discord limits even with a long display name', ()
       limit: 10,
       offset: 0,
       showDeleted: false,
+      kinds: ['bill'],
     },
     20,
   );
@@ -1663,6 +1948,7 @@ test('a display name containing a colon does not corrupt the paging state', () =
       limit: 5,
       offset: 15,
       showDeleted: false,
+      kinds: ['bill'],
     },
     15,
   );

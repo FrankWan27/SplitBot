@@ -7,8 +7,9 @@ import {
   type ButtonInteraction,
   type ChatInputCommandInteraction,
 } from 'discord.js';
-import { entryWhen, type BillEntry, type LedgerEntry, type Store } from '../db.js';
+import { entryWhen, type BillEntry, type EntryKind, type LedgerEntry, type Store } from '../db.js';
 import { dayHeading, dayKey, displayTimeZone } from '../dates.js';
+import { UserError } from '../errors.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
 
@@ -28,7 +29,7 @@ const MAX_DESCRIPTION = 4096;
 export const data = guildOnly(
   new SlashCommandBuilder()
     .setName('history')
-    .setDescription('Show recently logged bills and payments')
+    .setDescription('Show recently logged bills')
     .addUserOption((o) =>
       o.setName('user').setDescription('Only show entries involving this person'),
     )
@@ -39,12 +40,53 @@ export const data = guildOnly(
         .setMinValue(1)
         .setMaxValue(MAX_COUNT),
     )
+    // Two independent flags rather than one three-way choice, so "both" is
+    // expressible and each reads as what it turns on.
+    .addBooleanOption((o) =>
+      o.setName('bills').setDescription('Show bills (default: yes)'),
+    )
+    .addBooleanOption((o) =>
+      o.setName('payments').setDescription('Also show payments between people (default: no)'),
+    )
     .addBooleanOption((o) =>
       o
         .setName('show_deleted')
         .setDescription('Also show deleted entries, struck through (default: no)'),
     ),
 );
+
+/**
+ * Which kinds a listing covers, from the two flags.
+ *
+ * Bills are what a ledger is mostly read for, and payments are bookkeeping that
+ * mostly just pushes bills off the page - so bills alone is the default. Asking
+ * for `payments:true` alone is read as "payments instead", not "payments as well":
+ * anyone who wants both can say so, and silently adding bills back would make the
+ * flag impossible to use on its own.
+ */
+export function resolveKinds(options: {
+  bills: boolean | null;
+  payments: boolean | null;
+}): EntryKind[] {
+  const bills = options.bills ?? (options.payments !== true);
+  const payments = options.payments ?? false;
+
+  if (!bills && !payments) {
+    // Asks for an empty listing. Refused rather than rendered, since an empty page
+    // is indistinguishable from an empty ledger - and `bills:false` on its own is
+    // the same request, since payments are off by default. Guessing that they meant
+    // `payments:true` would be inventing a filter they did not ask for.
+    throw new UserError(
+      'That would show nothing. Set `payments:true` to list payments, ' +
+        'or leave both options alone to list bills.',
+    );
+  }
+
+  const kinds: EntryKind[] = [];
+  if (bills) kinds.push('bill');
+  if (payments) kinds.push('payment');
+  return kinds;
+}
 
 /** Renders a Discord relative timestamp, which localises itself per viewer. */
 function timestamp(iso: string): string {
@@ -140,6 +182,8 @@ export interface PageRequest {
   offset: number;
   /** Whether deleted entries are included, which paging has to carry across. */
   showDeleted: boolean;
+  /** Which kinds the listing covers, which paging also has to carry across. */
+  kinds: readonly EntryKind[];
 }
 
 /**
@@ -147,19 +191,32 @@ export interface PageRequest {
  * memory, so buttons keep working across a bot restart and nothing has to be
  * expired. Format:
  *
- *     history:<offset>:<limit>:<focusId or ->:<d or ->:<focusLabel>
+ *     history:<offset>:<limit>:<focusId or ->:<flags>:<focusLabel>
  *
- * The `d` flag carries `show_deleted`, so paging a listing that includes deleted
- * entries does not silently drop them on the second page.
+ * `flags` is a set of letters, or `-` for none: `d` for `show_deleted`, `b` for
+ * bills and `p` for payments. Paging has to carry every filter, or the second page
+ * would quietly cover something the first did not.
  */
 const CUSTOM_ID_PREFIX = 'history';
 
 /** Discord rejects a custom id longer than this. */
 const MAX_CUSTOM_ID = 100;
 
+function encodeFlags(req: PageRequest): string {
+  const flags =
+    (req.showDeleted ? 'd' : '') +
+    (req.kinds.includes('bill') ? 'b' : '') +
+    (req.kinds.includes('payment') ? 'p' : '');
+  return flags === '' ? '-' : flags;
+}
+
+/** Whether a custom id field is the flags field rather than a label that looks like one. */
+function isFlagsField(field: string | undefined): boolean {
+  return field === '-' || (field !== undefined && field !== '' && /^[dbp]+$/.test(field));
+}
+
 export function encodePageId(req: PageRequest, offset: number): string {
-  const flag = req.showDeleted ? 'd' : '-';
-  const head = `${CUSTOM_ID_PREFIX}:${offset}:${req.limit}:${req.focusId ?? '-'}:${flag}:`;
+  const head = `${CUSTOM_ID_PREFIX}:${offset}:${req.limit}:${req.focusId ?? '-'}:${encodeFlags(req)}:`;
   // A display name can contain a colon, so the label goes last and is parsed as
   // "everything after the fifth colon". Truncated to fit Discord's id limit.
   return head + (req.focusLabel ?? '').slice(0, MAX_CUSTOM_ID - head.length);
@@ -176,11 +233,21 @@ export function parsePageId(customId: string): PageRequest | null {
 
   const focusId = parts[3] === '-' ? null : parts[3]!;
 
-  // Buttons on messages sent before the flag existed have the label at index 4.
-  // Reading it as a label in that case keeps those buttons working rather than
-  // leaving them dead, at the cost of misreading a label of exactly `d` or `-`.
-  const flagged = parts.length >= 6 && (parts[4] === 'd' || parts[4] === '-');
+  // Buttons on messages sent before the flags field existed have the label at
+  // index 4. Reading it as a label in that case keeps those buttons working rather
+  // than leaving them dead, at the cost of misreading a label of exactly `-` or
+  // one spelt only from `dbp`.
+  const flagged = parts.length >= 6 && isFlagsField(parts[4]);
+  const flags = flagged ? parts[4]! : '';
   const label = parts.slice(flagged ? 5 : 4).join(':');
+
+  // An id from before the kind flags existed listed everything, so that is what
+  // its buttons keep doing - changing what an old button shows would be a
+  // surprise, and the listing it is paging is already on screen.
+  const kinds: EntryKind[] =
+    flags.includes('b') || flags.includes('p')
+      ? [...(flags.includes('b') ? (['bill'] as const) : []), ...(flags.includes('p') ? (['payment'] as const) : [])]
+      : ['bill', 'payment'];
 
   return {
     guildId: '',
@@ -188,8 +255,26 @@ export function parsePageId(customId: string): PageRequest | null {
     focusLabel: label === '' ? null : label,
     limit,
     offset,
-    showDeleted: flagged && parts[4] === 'd',
+    showDeleted: flags.includes('d'),
+    kinds,
   };
+}
+
+/**
+ * What the listing is called, given what it covers.
+ *
+ * Naming the kinds is what keeps a filtered listing honest: "Recent history" over
+ * bills only would imply the payments simply were not there.
+ */
+function kindNoun(kinds: readonly EntryKind[]): string {
+  const bills = kinds.includes('bill');
+  const payments = kinds.includes('payment');
+  if (bills && payments) return 'history';
+  return bills ? 'bills' : 'payments';
+}
+
+function titleCase(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
 /** Builds the embed and buttons for one page. */
@@ -206,9 +291,11 @@ function buildPage(
     limit: req.limit,
     offset: req.offset,
     includeVoided: req.showDeleted,
+    kinds: req.kinds,
   });
 
-  const base = req.focusLabel ? `🕓 History for ${req.focusLabel}` : '🕓 Recent history';
+  const noun = kindNoun(req.kinds);
+  const base = req.focusLabel ? `🕓 ${titleCase(noun)} for ${req.focusLabel}` : `🕓 Recent ${noun}`;
   // Stated in the title, since a struck-through entry is easy to miss and a
   // listing that includes deleted ones does not add up against `/balances`.
   const title = req.showDeleted ? `${base} (including deleted)` : base;
@@ -220,12 +307,30 @@ function buildPage(
     if (req.offset > 0) {
       empty.setTitle(title).setDescription('No more entries. Page back to see earlier ones.');
     } else {
+      // An empty page has two quite different causes, and saying the wrong one is
+      // misleading either way: on a new server "nothing logged yet" is the useful
+      // answer, but once entries exist and a filter is hiding all of them, that
+      // sentence is simply false. So the ledger is checked before claiming either.
+      const hiding =
+        req.kinds.length === 1 &&
+        store.recentEntries({
+          guildId: req.guildId,
+          userId: req.focusId ?? undefined,
+          limit: 1,
+          includeVoided: req.showDeleted,
+        }).entries.length > 0;
+
+      const hint = hiding
+        ? req.kinds[0] === 'payment'
+          ? ' Bills are listed by default, without `payments:true`.'
+          : ' Payments are listed with `payments:true`.'
+        : ' Start with `/bill`.';
       empty
-        .setTitle('🕓 Nothing logged yet')
+        .setTitle(hiding ? `🕓 No ${noun} to show` : '🕓 Nothing logged yet')
         .setDescription(
           req.focusId
-            ? `No bills or payments involving <@${req.focusId}> yet.`
-            : 'No bills or payments have been logged in this server yet. Start with `/bill`.',
+            ? `No ${noun} involving <@${req.focusId}> yet.${hint}`
+            : `No ${noun} have been logged in this server yet.${hint}`,
         );
     }
     return { embeds: [empty], components: buttonRows(req, { hasMore: false, shown: 0 }) };
@@ -335,6 +440,10 @@ export async function execute(
       limit: interaction.options.getInteger('count') ?? DEFAULT_COUNT,
       offset: 0,
       showDeleted: interaction.options.getBoolean('show_deleted') ?? false,
+      kinds: resolveKinds({
+        bills: interaction.options.getBoolean('bills'),
+        payments: interaction.options.getBoolean('payments'),
+      }),
     },
     store,
   );

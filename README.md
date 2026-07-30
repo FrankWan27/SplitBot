@@ -91,20 +91,32 @@ Overpaying is allowed, and the reply says plainly that the debt has flipped dire
 
 ### `/history`
 
-Show recently logged bills and payments, newest first.
+Show recently logged bills, newest first.
 
 | Option | Required | Meaning |
 |---|---|---|
 | `user` | no | Only entries involving this person |
 | `count` | no | How many to show, 1-25; defaults to 5 |
+| `bills` | no | Show bills; defaults to yes |
+| `payments` | no | Show payments between people; defaults to no |
 | `show_deleted` | no | Also list deleted entries, struck through; defaults to no |
 
 ```
-/history                     # last 5 entries in this server
-/history user:@bob           # everything bob was involved in
-/history count:25            # a longer stretch
-/history show_deleted:true   # including deleted ones
+/history                            # last 5 bills in this server
+/history user:@bob                  # bills bob was involved in
+/history count:25                   # a longer stretch
+/history payments:true              # payments instead of bills
+/history bills:true payments:true   # everything, the way older versions listed it
+/history show_deleted:true          # including deleted ones
 ```
+
+**Bills only, by default.**
+Payments are bookkeeping - they mostly just push the bills you were looking for off the page - so they are listed only when asked for.
+`payments:true` means payments *instead of* bills rather than as well, so the flag is usable on its own; ask for both to get the combined listing.
+Setting `bills:false` on its own is refused rather than guessed at, since payments are already off and there would be nothing left to show.
+
+The title says what the listing covers - `Recent bills`, `Recent payments`, or `Recent history` for both - because a listing that quietly omitted payments while calling itself history would read as an empty ledger.
+For the same reason, an empty page distinguishes a server with nothing logged from one where the filter is hiding everything.
 
 ```
 🕓 Recent history
@@ -142,6 +154,7 @@ Set `DISPLAY_TIMEZONE` in `.env` to an IANA name such as `America/New_York`; it 
 
 **Paging.** ⬆️ Newer and ⬇️ Older buttons edit the same message in place rather than posting a listing per click, and are omitted entirely when everything fits on one page.
 Each button carries its paging state in its Discord custom id rather than in bot memory, so buttons on an old message keep working after a restart.
+Every filter rides along in that id - the user, the count, which kinds, and `show_deleted` - so page two covers exactly what page one did.
 Anyone who can see the message can click them.
 
 ### `/edit`
@@ -259,7 +272,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 230 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 250 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

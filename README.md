@@ -102,18 +102,21 @@ Show recently logged bills, newest first.
 | `show_deleted` | no | Also list deleted entries, struck through; defaults to no |
 
 ```
-/history                            # last 5 bills in this server
-/history user:@bob                  # bills bob was involved in
-/history count:25                   # a longer stretch
-/history payments:true              # payments instead of bills
-/history bills:true payments:true   # everything, the way older versions listed it
-/history show_deleted:true          # including deleted ones
+/history                              # last 5 bills in this server
+/history user:@bob                    # bills bob was involved in
+/history count:25                     # a longer stretch
+/history payments:true                # bills and payments together
+/history bills:false payments:true    # payments only
+/history show_deleted:true            # including deleted ones
 ```
 
 **Bills only, by default.**
 Payments are bookkeeping - they mostly just push the bills you were looking for off the page - so they are listed only when asked for.
-`payments:true` means payments *instead of* bills rather than as well, so the flag is usable on its own; ask for both to get the combined listing.
-Setting `bills:false` on its own is refused rather than guessed at, since payments are already off and there would be nothing left to show.
+
+Each flag means only itself.
+`bills` is on unless you turn it off and `payments` is off unless you turn it on, and neither one moves the other: `payments:true` *adds* payments to the bills already listed, because nothing said to stop listing bills.
+Payments on their own are `bills:false payments:true`, said explicitly.
+Turning both off is refused, since there would be nothing left to show.
 
 The title says what the listing covers - `Recent bills`, `Recent payments`, or `Recent history` for both - because a listing that quietly omitted payments while calling itself history would read as an empty ledger.
 For the same reason, an empty page distinguishes a server with nothing logged from one where the filter is hiding everything.

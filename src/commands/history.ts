@@ -58,27 +58,26 @@ export const data = guildOnly(
 /**
  * Which kinds a listing covers, from the two flags.
  *
- * Bills are what a ledger is mostly read for, and payments are bookkeeping that
- * mostly just pushes bills off the page - so bills alone is the default. Asking
- * for `payments:true` alone is read as "payments instead", not "payments as well":
- * anyone who wants both can say so, and silently adding bills back would make the
- * flag impossible to use on its own.
+ * Each flag means only itself: `bills` is on unless turned off, `payments` is off
+ * unless turned on, and neither moves the other. So `payments:true` adds payments
+ * to the bills already being listed - reading it as "payments instead" would let
+ * one flag silently change another's default, which is not something a reader of
+ * the option list could predict. Payments on their own are `bills:false
+ * payments:true`, said explicitly.
  */
 export function resolveKinds(options: {
   bills: boolean | null;
   payments: boolean | null;
 }): EntryKind[] {
-  const bills = options.bills ?? (options.payments !== true);
+  const bills = options.bills ?? true;
   const payments = options.payments ?? false;
 
   if (!bills && !payments) {
     // Asks for an empty listing. Refused rather than rendered, since an empty page
-    // is indistinguishable from an empty ledger - and `bills:false` on its own is
-    // the same request, since payments are off by default. Guessing that they meant
-    // `payments:true` would be inventing a filter they did not ask for.
+    // is indistinguishable from an empty ledger.
     throw new UserError(
-      'That would show nothing. Set `payments:true` to list payments, ' +
-        'or leave both options alone to list bills.',
+      'That would show nothing. `bills:false` needs `payments:true` alongside it ' +
+        'to leave something to list.',
     );
   }
 

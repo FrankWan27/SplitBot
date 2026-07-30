@@ -953,7 +953,7 @@ test('e2e: history with no flags shows bills and leaves payments out', async () 
   store.close();
 });
 
-test('e2e: payments:true shows payments instead of bills, not as well', async () => {
+test('e2e: payments:true adds payments without turning bills off', async () => {
   const store = new Store(':memory:');
   await seedOneOfEach(store);
 
@@ -962,13 +962,28 @@ test('e2e: payments:true shows payments instead of bills, not as well', async ()
   const text = replyText(run.replies[0]!);
 
   assert.match(text, /paid <@100>/);
-  // Adding bills back would leave no way to ask for payments on their own.
-  assert.doesNotMatch(text, /a bill/, 'asking for payments means payments');
+  // One flag must not silently change another's default: `bills` is still yes,
+  // because nothing said otherwise.
+  assert.match(text, /a bill/, 'bills stay on unless turned off');
+  assert.match(text, /Recent history/);
+  store.close();
+});
+
+test('e2e: payments on their own take both flags, said explicitly', async () => {
+  const store = new Store(':memory:');
+  await seedOneOfEach(store);
+
+  const run = makeInteraction({ caller: ALICE, booleans: { bills: false, payments: true } });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /paid <@100>/);
+  assert.doesNotMatch(text, /a bill/);
   assert.match(text, /Recent payments/);
   store.close();
 });
 
-test('e2e: both flags together show both kinds under the history title', async () => {
+test('e2e: both flags set explicitly show both kinds under the history title', async () => {
   const store = new Store(':memory:');
   await seedOneOfEach(store);
 
@@ -1011,7 +1026,7 @@ test('e2e: asking for nothing is refused rather than showing an empty page', asy
       (err: unknown) => {
         assert.ok(err instanceof UserError);
         assert.match(err.message, /show nothing/);
-        assert.match(err.message, /payments:true/, 'the error names the fix that fits');
+        assert.match(err.message, /payments:true/, 'the error names what to add');
         return true;
       },
       JSON.stringify(booleans),
@@ -1030,7 +1045,7 @@ test('e2e: a payments-only listing with nothing to show points back at the defau
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, booleans: { payments: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { bills: false, payments: true } });
   await history.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   // The ledger is not empty; the filter is what emptied the page, and saying so

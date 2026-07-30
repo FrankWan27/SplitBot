@@ -365,6 +365,240 @@ test('a batch cannot reach into another guild', () => {
   s.close();
 });
 
+/**
+ * `entriesBetween` reconstructs a pair's balance from the append-only log, while
+ * the balance itself is maintained separately. The two agreeing is the whole
+ * contract: a breakdown that did not sum to the figure `/balances` prints would be
+ * worse than no breakdown at all. So every test here checks the sum, not just the
+ * rows returned.
+ */
+
+/** What each contribution was for, in order. Payments have no description. */
+function labels(s: Store, creditor: string, debtor: string): (string | null)[] {
+  return s
+    .entriesBetween(G, creditor, debtor)
+    .map(({ entry }) => (entry.kind === 'payment' ? 'payment' : entry.description));
+}
+
+/** The reconstructed balance for a pair, as the breakdown's running total ends. */
+function reconstructed(s: Store, creditor: string, debtor: string): number {
+  return s
+    .entriesBetween(G, creditor, debtor)
+    .reduce((sum, c) => sum + c.cents, 0);
+}
+
+/** Asserts every live pair's reconstruction equals its stored balance. */
+function assertReconstructsAll(s: Store): void {
+  const balances = s.allBalances(G);
+  assert.ok(balances.length > 0, 'nothing to check');
+  for (const b of balances) {
+    assert.equal(
+      reconstructed(s, b.creditor, b.debtor),
+      b.cents,
+      `${b.debtor} → ${b.creditor} must reconstruct to its stored balance`,
+    );
+  }
+}
+
+test('entriesBetween sums to the stored balance for a simple debt', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  const contributions = s.entriesBetween(G, alice, bob);
+  assert.equal(contributions.length, 1);
+  assert.equal(contributions[0]!.cents, 1000, 'signed as what bob owes alice');
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('a payment contributes negatively, so the breakdown pays the debt down', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  s.recordPayment({ guildId: G, fromId: bob, toId: alice, cents: 400, createdBy: bob, createdAt: AT });
+
+  const contributions = s.entriesBetween(G, alice, bob);
+  assert.deepEqual(contributions.map((c) => c.cents), [1000, -400]);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('bills running both ways net out to the stored figure', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'alice paid');
+  bill(s, bob, 800, [alice, bob], 'bob paid');
+  // A pair with debt in both directions is where a sign error hides: each figure
+  // is plausible alone and only the total gives it away.
+  assert.equal(reconstructed(s, alice, bob), 600);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('the sign flips with the argument order, since either person can be the debtor', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  assert.equal(reconstructed(s, alice, bob), 1000);
+  assert.equal(reconstructed(s, bob, alice), -1000, 'the same debt seen from the other side');
+  s.close();
+});
+
+test('a bill two people merely shared is not part of their own balance', () => {
+  const s = fresh();
+  // Both owe carol; neither owes the other because of it.
+  bill(s, carol, 3000, [alice, bob, carol], 'carol paid');
+  assert.deepEqual(s.entriesBetween(G, alice, bob), []);
+  assert.deepEqual(s.entriesBetween(G, bob, alice), []);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('a voided entry drops out of the breakdown as it drops out of the balance', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'keep');
+  bill(s, alice, 800, [alice, bob], 'drop');
+  const [, second] = ids(s) as [number, number];
+  s.voidEntries({ guildId: G, ids: [second], voidedBy: bob, voidedAt: AT });
+
+  assert.deepEqual(labels(s, alice, bob), ['keep']);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('a restored entry comes back into the breakdown', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  const [first] = ids(s) as [number];
+  s.voidEntries({ guildId: G, ids: [first], voidedBy: bob, voidedAt: AT });
+  assert.deepEqual(s.entriesBetween(G, alice, bob), []);
+
+  s.restoreEntries({ guildId: G, ids: [first] });
+  assert.equal(reconstructed(s, alice, bob), 1000);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('an edited bill reconstructs to its edited amount, not its original', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  const [first] = ids(s) as [number];
+  s.editBill({
+    guildId: G,
+    id: first,
+    totalCents: 3000,
+    splits: [
+      { userId: alice, shareCents: 1500 },
+      { userId: bob, shareCents: 1500 },
+    ],
+    editedBy: bob,
+    editedAt: AT,
+  });
+  assert.equal(reconstructed(s, alice, bob), 1500);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('an uneven split reconstructs at the stored shares, penny included', () => {
+  const s = fresh();
+  // $10 three ways: the pinned draw gives alice the spare penny, so bob and carol
+  // owe $3.33 each. Reconstructing by dividing the total would give them $3.34.
+  bill(s, alice, 1000, [alice, bob, carol], 'coffee');
+  assert.equal(reconstructed(s, alice, bob), 333);
+  assert.equal(reconstructed(s, alice, carol), 333);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('the breakdown is ordered oldest first, so a running total reads forwards', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'first');
+  bill(s, alice, 1000, [alice, bob], 'second');
+  bill(s, alice, 600, [alice, bob], 'third');
+  assert.deepEqual(labels(s, alice, bob), ['first', 'second', 'third']);
+  s.close();
+});
+
+test('a backdated bill sits where it happened, not where it was typed', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'typed first');
+  s.recordBill({
+    guildId: G,
+    payerId: alice,
+    totalCents: 1000,
+    splits: [
+      { userId: alice, shareCents: 500 },
+      { userId: bob, shareCents: 500 },
+    ],
+    description: 'happened earlier',
+    createdBy: alice,
+    createdAt: AT,
+    occurredAt: '2025-12-01T00:00:00.000Z',
+  });
+  assert.deepEqual(labels(s, alice, bob), ['happened earlier', 'typed first']);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('a settled pair reconstructs to zero rather than to its last bill', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'dinner');
+  s.recordPayment({ guildId: G, fromId: bob, toId: alice, cents: 1000, createdBy: bob, createdAt: AT });
+  // The pair is gone from allBalances, so assertReconstructsAll would not see it.
+  assert.equal(s.owedBetween(G, bob, alice), 0);
+  assert.equal(reconstructed(s, alice, bob), 0);
+  assert.equal(s.entriesBetween(G, alice, bob).length, 2, 'both entries are still listed');
+  s.close();
+});
+
+test('a breakdown does not reach into another guild', () => {
+  const s = fresh();
+  bill(s, alice, 2000, [alice, bob], 'mine');
+  s.recordBill({
+    guildId: 'guild-2',
+    payerId: alice,
+    totalCents: 5000,
+    splits: [{ userId: bob, shareCents: 5000 }],
+    description: 'theirs',
+    createdBy: alice,
+    createdAt: AT,
+  });
+  assert.deepEqual(labels(s, alice, bob), ['mine']);
+  s.close();
+});
+
+test('the pair-ordering flip does not affect the reconstruction', () => {
+  const s = fresh();
+  // zed sorts before alice, so this pair is stored with the ids the other way
+  // round from how they are asked for here.
+  bill(s, zed, 2000, [zed, alice], 'dinner');
+  assert.equal(reconstructed(s, zed, alice), 1000);
+  assertReconstructsAll(s);
+  s.close();
+});
+
+test('a many-entry ledger reconstructs every pair exactly', () => {
+  const s = fresh();
+  // Mixed shapes, both directions, an uneven total, a payment, a delete and an
+  // edit: the sum has to survive all of them together, not one at a time.
+  bill(s, alice, 3000, [alice, bob, carol], 'group dinner');
+  bill(s, bob, 1000, [alice, bob], 'bob paid');
+  bill(s, carol, 700, [alice, bob, carol], 'coffee');
+  s.recordPayment({ guildId: G, fromId: bob, toId: alice, cents: 250, createdBy: bob, createdAt: AT });
+  bill(s, alice, 1600, [alice, carol], 'taxi');
+  const all = ids(s);
+  s.voidEntries({ guildId: G, ids: [all[2]!], voidedBy: bob, voidedAt: AT });
+  s.editBill({
+    guildId: G,
+    id: all[4]!,
+    totalCents: 2000,
+    splits: [
+      { userId: alice, shareCents: 1000 },
+      { userId: carol, shareCents: 1000 },
+    ],
+    editedBy: bob,
+    editedAt: AT,
+  });
+  assertReconstructsAll(s);
+  s.close();
+});
+
 test('data survives reopening the same database file', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

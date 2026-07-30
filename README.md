@@ -38,10 +38,40 @@ A backdated bill affects balances immediately; the date only changes where it si
 
 Show outstanding debts, largest first.
 
+| Option | Required | Meaning |
+|---|---|---|
+| `user` | no | Only show debts involving this person, plus their net position |
+| `details` | no | List the bills and payments each balance is made of; defaults to no |
+
 ```
-/balances              # everyone in the server
-/balances user:@bob    # only debts involving bob, plus his net position
+/balances                    # everyone in the server
+/balances user:@bob          # only debts involving bob, plus his net position
+/balances details:true       # every balance, with the entries behind it
+/balances user:@bob details:true
 ```
+
+`details` answers "why do I owe that?".
+Each balance is followed by the entries that make it up, oldest first, with a running total that ends on the figure in the headline - so a disputed balance can be checked line by line instead of taken on trust.
+
+```
+💰 Balances for bob
+
+_Each line is signed as what the first person owes the second._
+
+@bob → @franky  **$6.00**
+ `#12` 07/26 dinner at Nopa **+$10.00** → $10.00
+ `#14` 07/27 _payment_ **-$5.00** → $5.00
+ `#15` 07/28 bagels **+$1.00** → $6.00
+```
+
+Signs are relative to the debt in the headline, so a payment visibly subtracts and a bill running the other way does too.
+The entry ids are the same ones `/edit` and `/delete` take, so a line you disagree with can be fixed on the spot.
+
+Deleted entries are left out, since they no longer affect the balance and including them would break the running total; `/history show_deleted:true` is where they stay visible.
+A bill you both merely shared - say one you each owed a third person for - does not appear, because it moved nothing between the two of you.
+
+A breakdown runs to several lines per pair, so at most 8 pairs are broken down at once; the reply says how many it left out.
+Narrow it with `user` to see a specific person's in full.
 
 ### `/settle`
 
@@ -212,6 +242,9 @@ Every bill and payment is also appended to an `entries` audit table, which is wh
 Balances are never computed from it - they are maintained directly - so a display bug in the history cannot corrupt a balance.
 Editing and deleting keep that append-only property, and reverse their effect on balances explicitly, since there is no recomputation to fall back on.
 
+`/balances details:true` does reconstruct each pair from the log, but only to display it; the stored balance is still the authoritative figure.
+The two agreeing is exactly what the breakdown's running total asserts, and the tests check that they agree over deletes, restores, edits, uneven splits, and debts running both ways.
+
 Opening the database brings an older file up to the current schema by adding any missing columns.
 New columns are nullable with no default, which makes this safe on rows already written.
 
@@ -228,7 +261,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 168 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 230 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

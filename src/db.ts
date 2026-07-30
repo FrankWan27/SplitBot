@@ -40,6 +40,13 @@ export interface BillSplit {
   shareCents: number;
 }
 
+/** One entry's contribution to the debt between a particular pair of people. */
+export interface PairContribution {
+  entry: LedgerEntry;
+  /** Signed as "debtor owes creditor", so a pair's contributions sum to its balance. */
+  cents: number;
+}
+
 /**
  * Bookkeeping every entry carries, whatever its kind: who logged it, and whether
  * it has since been changed or deleted.
@@ -190,6 +197,34 @@ function toLedgerEntry(row: EntryRow): LedgerEntry {
     splits,
     occurredAt: row.occurred_at ?? null,
   };
+}
+
+/**
+ * How much `entry` moved the debt between one pair, signed so that a positive
+ * number increased what `debtor` owes `creditor`. Zero when the entry does not
+ * touch the pair at all.
+ *
+ * This is the same arithmetic `applyDebt` performed when the entry was recorded,
+ * read back out per pair. It has to stay in step with `recordBill` and
+ * `recordPayment` - including their skips, since a payer's own share and a zero
+ * share were never booked and must not be reported as though they were.
+ */
+function pairEffect(entry: LedgerEntry, creditor: string, debtor: string): number {
+  if (entry.kind === 'payment') {
+    // recordPayment reduced what `from` owes `to`.
+    if (entry.fromId === debtor && entry.toId === creditor) return -entry.cents;
+    if (entry.fromId === creditor && entry.toId === debtor) return entry.cents;
+    return 0;
+  }
+
+  const shareOf = (userId: string): number =>
+    entry.splits.find((s) => s.userId === userId)?.shareCents ?? 0;
+
+  // The payer fronted the money, so every other participant's share is debt owed
+  // to them. A participant's own share against themselves was never booked.
+  if (entry.payerId === creditor && debtor !== creditor) return shareOf(debtor);
+  if (entry.payerId === debtor && creditor !== debtor) return -shareOf(creditor);
+  return 0;
 }
 
 /**
@@ -718,6 +753,42 @@ export class Store {
 
     const hasMore = parsed.length > args.limit;
     return { entries: hasMore ? parsed.slice(0, args.limit) : parsed, hasMore };
+  }
+
+  /**
+   * Every live entry that moved the debt between two people, oldest first, with
+   * how much each one moved it.
+   *
+   * `cents` is signed in the direction "`debtor` owes `creditor`", so the values
+   * sum to the pair's current balance. That is the property worth having: it means
+   * a listing of these lines can be checked against `/balances` by adding it up,
+   * which is what makes it usable for settling an argument about a figure.
+   *
+   * Deleted entries are left out. They no longer contribute to the balance, so
+   * including them would break that sum; `/history show_deleted:true` is where
+   * they remain visible.
+   */
+  entriesBetween(guildId: string, creditor: string, debtor: string): PairContribution[] {
+    // Reuses the ordering `recentEntries` uses, reversed: a running total reads
+    // naturally oldest-first, and a backdated bill belongs where it happened.
+    const rows = this.db
+      .prepare(
+        `SELECT ${ENTRY_COLUMNS}
+           FROM entries
+          WHERE guild_id = ? AND voided_at IS NULL
+          ORDER BY COALESCE(occurred_at, created_at) ASC, id ASC`,
+      )
+      .all(guildId) as unknown as EntryRow[];
+
+    const contributions: PairContribution[] = [];
+    for (const row of rows) {
+      const entry = toLedgerEntry(row);
+      const cents = pairEffect(entry, creditor, debtor);
+      // A bill both were in but which moved nothing between *them* - say one they
+      // each owed a third person for - is not part of this balance.
+      if (cents !== 0) contributions.push({ entry, cents });
+    }
+    return contributions;
   }
 
   /** Every outstanding debt in the guild, largest first. */

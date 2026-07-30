@@ -4,6 +4,7 @@ import { Store, type BillEntry } from '../src/db.js';
 import { UserError } from '../src/errors.js';
 import * as bill from '../src/commands/bill.js';
 import * as balances from '../src/commands/balances.js';
+import { MAX_DETAILED_PAIRS } from '../src/commands/balances.js';
 import * as settle from '../src/commands/settle.js';
 import * as history from '../src/commands/history.js';
 import * as edit from '../src/commands/edit.js';
@@ -38,7 +39,13 @@ const CAROL = user('300', 'carol');
 const DAVE = user('400', 'dave');
 const BOTUSER = user('900', 'robot', true);
 
-const MEMBERS = [ALICE, BOB, CAROL, DAVE, BOTUSER];
+/**
+ * Enough extra people to exceed the detail cap on `/balances`, which needs more
+ * distinct pairs than a four-person server can produce.
+ */
+const EXTRAS = Array.from({ length: 12 }, (_, i) => user(String(500 + i), `extra${i}`));
+
+const MEMBERS = [ALICE, BOB, CAROL, DAVE, BOTUSER, ...EXTRAS];
 
 interface FakeButton {
   custom_id: string;
@@ -562,6 +569,288 @@ test('e2e: balances for a specific user shows their net position', async () => {
   const text = replyText(run.replies[0]!);
   assert.match(text, /Balances for bob/);
   assert.match(text, /Owes \*\*\$6\.00\*\* overall/);
+  store.close();
+});
+
+/**
+ * The breakdown's whole value is that it adds up: a reader settling an argument
+ * follows it line by line to the figure /balances reports. So these check the
+ * arithmetic of the rendered lines, not just that lines appeared.
+ */
+
+/** Every `→ $x.yz` running total in a rendered breakdown, in order. */
+function runningTotals(text: string): string[] {
+  return [...text.matchAll(/→ (-?\$[\d,]+\.\d\d)$/gm)].map((m) => m[1]!);
+}
+
+/**
+ * The rendered block for one pair. A focused listing covers every pair the person
+ * is in, so a claim about one balance has to be checked against its own block
+ * rather than against the whole reply.
+ */
+function pairBlock(text: string, debtor: string, creditor: string): string {
+  const needle = `<@${debtor}> → <@${creditor}>`;
+  const found = text.split('\n\n').find((b) => b.includes(needle));
+  assert.ok(found, `expected a block for ${needle}`);
+  return found;
+}
+
+test('e2e: details shows the entries behind a balance, running up to its total', async () => {
+  const store = new Store(':memory:');
+  // Alice pays $30 split 3 ways, so bob and carol owe $10 each.
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '30', with: '<@200> <@300>', description: 'dinner' },
+    }).interaction,
+    store,
+  );
+  // Then bob pays alice $4, leaving $6.
+  await settle.execute(
+    makeInteraction({ caller: BOB, users: { to: ALICE }, strings: { amount: '4' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /dinner/, 'names the bill');
+  assert.match(text, /_payment_/, 'includes the payment');
+  assert.match(text, /\*\*\+\$10\.00\*\*/, 'the bill adds to the debt');
+  assert.match(text, /\*\*-\$4\.00\*\*/, 'the payment subtracts from it');
+  // The last running total must equal the balance the headline states.
+  assert.deepEqual(runningTotals(text), ['$10.00', '$6.00']);
+  assert.match(text, /\*\*\$6\.00\*\*/, 'the headline agrees with the running total');
+  store.close();
+});
+
+test('e2e: without details the reply is the plain one-line-per-pair listing', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'dinner' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /<@200> → <@100>/, 'the pair line is still there');
+  assert.doesNotMatch(text, /dinner/, 'no breakdown unless it was asked for');
+  assert.doesNotMatch(text, /signed as what/, 'and no sign key to explain one');
+  store.close();
+});
+
+test('e2e: a breakdown covering both directions still lands on the net figure', async () => {
+  const store = new Store(':memory:');
+  // Alice fronts $20 for bob, then bob fronts $8 for alice. Net: bob owes $6.
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'dinner' },
+    }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({
+      caller: BOB,
+      strings: { amount: '8', with: '<@100>', description: 'bagels' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // The second bill runs the other way, so it has to subtract rather than add.
+  assert.match(text, /bagels \*\*-\$4\.00\*\*/);
+  assert.deepEqual(runningTotals(text), ['$10.00', '$6.00']);
+  store.close();
+});
+
+test('e2e: an uneven split is broken down at the share each person actually owes', async () => {
+  const store = new Store(':memory:');
+  // $10 three ways is one share of $3.34 and two of $3.33. Whoever carries the
+  // spare penny must be shown their real share, not an averaged figure.
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '10', with: '<@200> <@300>', description: 'coffee' },
+    }).interaction,
+    store,
+  );
+
+  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  for (const debtor of [BOB, CAROL]) {
+    const share = entry.splits.find((s) => s.userId === debtor.id)!.shareCents;
+    // The stored share, not an even division of the total: the person holding the
+    // spare penny is owed that penny, and a breakdown that hid it would not sum.
+    assert.match(
+      pairBlock(text, debtor.id, ALICE.id),
+      new RegExp(`coffee \\*\\*\\+\\$3\\.${String(share % 100)}\\*\\*`),
+      `${debtor.username} is broken down at their real share of ${share}`,
+    );
+  }
+  store.close();
+});
+
+test('e2e: a bill two people merely shared does not appear in their pair breakdown', async () => {
+  const store = new Store(':memory:');
+  // Carol pays; alice and bob each owe her. Nothing moves between alice and bob,
+  // so their own balance must not list it.
+  await bill.execute(
+    makeInteraction({
+      caller: CAROL,
+      strings: { amount: '30', with: '<@100> <@200>', description: 'carols dinner' },
+    }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '10', with: '<@200>', description: 'alices coffee' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const block = pairBlock(replyText(run.replies[0]!), BOB.id, ALICE.id);
+
+  assert.match(block, /alices coffee/, 'the bill between them is listed');
+  assert.doesNotMatch(
+    block,
+    /carols dinner/,
+    'a bill they only both shared moved nothing between them',
+  );
+  assert.deepEqual(runningTotals(block), ['$5.00']);
+  store.close();
+});
+
+test('e2e: a deleted bill drops out of the breakdown as well as the balance', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'keep me' },
+    }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '8', with: '<@200>', description: 'delete me' },
+    }).interaction,
+    store,
+  );
+  const doomed = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+  await del.execute(
+    makeInteraction({ caller: ALICE, integers: { id: doomed } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // A deleted entry no longer affects the balance, so listing it would break the
+  // sum the running total promises.
+  assert.doesNotMatch(text, /delete me/);
+  assert.match(text, /keep me/);
+  assert.deepEqual(runningTotals(text), ['$10.00']);
+  store.close();
+});
+
+test('e2e: pairs past the detail cap are reported, not silently dropped', async () => {
+  const store = new Store(':memory:');
+  // One pair per extra person, so the count is well past the cap.
+  const debtors = EXTRAS.slice(0, MAX_DETAILED_PAIRS + 3);
+  for (const [i, debtor] of debtors.entries()) {
+    await bill.execute(
+      makeInteraction({
+        caller: ALICE,
+        // Descending amounts, so the pairs sort predictably and the ones dropped
+        // are the ones at the end.
+        strings: {
+          amount: String((debtors.length - i) * 10),
+          with: `<@${debtor.id}>`,
+          description: `bill${i}`,
+        },
+      }).interaction,
+      store,
+    );
+  }
+
+  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  const dropped = debtors.length - MAX_DETAILED_PAIRS;
+
+  assert.match(text, /bill0/, 'the largest debt is broken down');
+  assert.doesNotMatch(text, /bill10/, 'the smallest is past the cap');
+  // A reader looking for a pair that is missing has to be able to tell it was cut
+  // rather than settled, and the footer total covers pairs the body does not.
+  assert.match(text, new RegExp(`${dropped} more pairs not broken down`));
+  assert.match(text, new RegExp(`${dropped} not shown above`));
+  store.close();
+});
+
+test('e2e: a focused listing reports dropped pairs too, having no total to hide behind', async () => {
+  const store = new Store(':memory:');
+  const others = EXTRAS.slice(0, MAX_DETAILED_PAIRS + 2);
+  for (const [i, other] of others.entries()) {
+    await bill.execute(
+      makeInteraction({
+        caller: ALICE,
+        strings: {
+          amount: String((others.length - i) * 10),
+          with: `<@${other.id}>`,
+          description: `bill${i}`,
+        },
+      }).interaction,
+      store,
+    );
+  }
+
+  const run = makeInteraction({ caller: ALICE, users: { user: ALICE }, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, new RegExp(`${others.length - MAX_DETAILED_PAIRS} more pairs did not fit`));
+  store.close();
+});
+
+test('e2e: a listing that fits says nothing about pairs not shown', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '20', with: '<@200>', description: 'dinner' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.doesNotMatch(text, /not broken down|not shown above|did not fit/);
+  store.close();
+});
+
+test('e2e: details on an empty ledger still just says all settled', async () => {
+  const store = new Store(':memory:');
+  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Nobody in this server owes anybody/);
+  assert.doesNotMatch(text, /signed as what/, 'no sign key with nothing to sign');
   store.close();
 });
 
@@ -1401,6 +1690,19 @@ test('delete and restore offer id and ids, neither of them required', async () =
       assert.notEqual(byName.get(name)?.required, true, `${json.name} ${name} must be optional`);
     }
   }
+});
+
+test('balances offers details as an optional boolean', async () => {
+  // Optional, and with no default declared on the option: a required flag would
+  // make Discord demand an answer for the common case of just wanting the totals.
+  const { ApplicationCommandOptionType } = await import('discord.js');
+  const json = balances.data.toJSON() as {
+    options?: Array<{ name: string; type: number; required?: boolean }>;
+  };
+  const option = (json.options ?? []).find((o) => o.name === 'details');
+  assert.ok(option, 'details is registered');
+  assert.equal(option.type, ApplicationCommandOptionType.Boolean);
+  assert.notEqual(option.required, true);
 });
 
 test('all commands are registered as guild-only, server-installed', async () => {

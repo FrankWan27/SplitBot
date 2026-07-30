@@ -112,12 +112,8 @@ function renderPlain(balances: PairBalance[]): Rendered {
  * as a listing that ran out of room.
  */
 function renderDetailed(balances: PairBalance[], guildId: string, store: Store): Rendered {
-  // The signs are meaningless without saying what they are relative to, and a
-  // reader who has to work that out from a payment line has already been misled.
-  // It leads the description, so it is part of the budget from the start.
-  const key = '_Each line is signed as what the first person owes the second._';
-  const blocks: string[] = [key];
-  let length = key.length;
+  const blocks: string[] = [];
+  let length = 0;
 
   for (const balance of balances.slice(0, MAX_DETAILED_PAIRS)) {
     const block = detailedBlock(
@@ -130,8 +126,7 @@ function renderDetailed(balances: PairBalance[], guildId: string, store: Store):
     length = added;
   }
 
-  // Less one for the key, which is not a pair.
-  const omitted = balances.length - (blocks.length - 1);
+  const omitted = balances.length - blocks.length;
   if (omitted > 0) {
     // Said in the body as well as the footer: a reader looking for a pair that is
     // not here needs to know it was dropped rather than settled.

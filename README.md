@@ -56,8 +56,6 @@ Each balance is followed by the entries that make it up, oldest first, with a ru
 ```
 💰 Balances for bob
 
-_Each line is signed as what the first person owes the second._
-
 @bob → @franky  **$6.00**
  `#12` 07/26 dinner at Nopa **+$10.00** → $10.00
  `#14` 07/27 _payment_ **-$5.00** → $5.00

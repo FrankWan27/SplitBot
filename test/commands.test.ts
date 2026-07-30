@@ -640,7 +640,7 @@ test('e2e: without details the reply is the plain one-line-per-pair listing', as
   const text = replyText(run.replies[0]!);
   assert.match(text, /<@200> → <@100>/, 'the pair line is still there');
   assert.doesNotMatch(text, /dinner/, 'no breakdown unless it was asked for');
-  assert.doesNotMatch(text, /signed as what/, 'and no sign key to explain one');
+  assert.deepEqual(runningTotals(text), [], 'and so no running totals either');
   store.close();
 });
 
@@ -850,7 +850,7 @@ test('e2e: details on an empty ledger still just says all settled', async () => 
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, /Nobody in this server owes anybody/);
-  assert.doesNotMatch(text, /signed as what/, 'no sign key with nothing to sign');
+  assert.deepEqual(runningTotals(text), [], 'nothing to break down');
   store.close();
 });
 

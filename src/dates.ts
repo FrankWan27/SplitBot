@@ -119,21 +119,89 @@ function digits(part: string): number | null {
   return /^\d{1,4}$/.test(part) ? Number(part) : null;
 }
 
+/** Month names in order, so a name's position is its number. */
+const MONTH_NAMES = [
+  'january',
+  'february',
+  'march',
+  'april',
+  'may',
+  'june',
+  'july',
+  'august',
+  'september',
+  'october',
+  'november',
+  'december',
+] as const;
+
+/**
+ * The month a word names (1-12), or null if it names none.
+ *
+ * Accepts the full name and the three-letter abbreviation, which is what people
+ * actually type. The input is already lowercased by the time this sees it, so
+ * `July`, `JUL` and `jul` all arrive as the same word.
+ *
+ * Deliberately narrow: `janu` and `sep2` are refused rather than matched on a
+ * prefix, since a word that is nearly a month name is more likely a typo worth
+ * pointing out than an abbreviation worth guessing at.
+ */
+function monthNumber(word: string): number | null {
+  // `Jul. 24` is a normal way to write an abbreviation, and the period carries no
+  // meaning of its own.
+  const name = word.endsWith('.') ? word.slice(0, -1) : word;
+  // `sept` is common enough to accept alongside `sep`, and ambiguous with nothing.
+  if (name === 'sept') return 9;
+  const index = MONTH_NAMES.findIndex(
+    (m) => m === name || (name.length === 3 && m.startsWith(name)),
+  );
+  return index === -1 ? null : index + 1;
+}
+
 /** The calendar date `now` falls on in UTC, as [year, month, day]. */
 function todayUtc(now: Date): [number, number, number] {
   return [now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate()];
 }
 
+/**
+ * The most recent year in which `month`/`day` has already come round.
+ *
+ * A date given without a year means the last time it happened, so `12/28` or
+ * `Dec 28` typed in July is last December rather than five months in the future -
+ * a bill can only be logged after the fact.
+ *
+ * Called only once the month and day are known to be in range, since a year
+ * inferred from a day like `32` would appear in the error message that follows and
+ * name a year the user never wrote.
+ */
+function mostRecentYear(month: number, day: number, now: Date): number {
+  const [nowYear, nowMonth, nowDay] = todayUtc(now);
+  return month > nowMonth || (month === nowMonth && day > nowDay) ? nowYear - 1 : nowYear;
+}
+
+/** The longest any month ever is, for range-checking a day before a year is known. */
+const MAX_DAYS_IN_ANY_MONTH = 31;
+
 function toStoredIso(year: number, month: number, day: number): string {
   return new Date(Date.UTC(year, month - 1, day, STORED_HOUR_UTC)).toISOString();
+}
+
+/** The catch-all refusal, listing one example of every accepted form. */
+function notADate(raw: string): DateError {
+  return new DateError(
+    `\`${raw.trim()}\` is not a date I understand. ` +
+      'Try `yesterday`, `July 20`, `2026-07-20`, or `7/20`.',
+  );
 }
 
 /**
  * Turn a user-supplied date into the ISO timestamp stored in `occurred_at`.
  *
- * Accepts `today`, `yesterday`, `YYYY-MM-DD`, and `M/D` or `M/D/YYYY`. The
- * slashed forms are read month-first, matching the `en-US` convention the rest of
- * the bot formats in; `YYYY-MM-DD` is there for anyone who wants to be explicit.
+ * Accepts `today`, `yesterday`, `YYYY-MM-DD`, `M/D` or `M/D/YYYY`, and a month by
+ * name: `July 20`, `Jul 20`, or `July 20, 2026`, in any case. Every form is read
+ * month-first, matching the `en-US` convention the rest of the bot formats in;
+ * `YYYY-MM-DD` is there for anyone who wants to be explicit. A form with no year
+ * means the most recent time that date happened.
  *
  * `now` is injectable so tests are not tied to the day they run on.
  */
@@ -151,49 +219,61 @@ export function parseDateToIso(raw: string, now: Date = new Date()): string {
     return d.toISOString();
   }
 
-  const parts = cleaned.split(/[-/]/);
+  // A comma is a separator rather than a part, so `July 20, 2026` reads the same
+  // as `July 20 2026`.
+  const words = cleaned.split(/[\s,]+/).filter((w) => w !== '');
+  const named = words.length > 1 ? monthNumber(words[0]!) : null;
+
+  // A year of `null` means "not written down", which is resolved to the most
+  // recent occurrence once the month and day are known to be real.
   let year: number | null;
   let month: number | null;
   let day: number | null;
+  let yearGiven: boolean;
 
-  if (cleaned.includes('-')) {
-    if (parts.length !== 3) {
-      throw new DateError(
-        `\`${raw.trim()}\` is not a date I understand. Try \`yesterday\`, \`2026-07-20\`, or \`7/20\`.`,
-      );
-    }
+  if (named !== null) {
+    // `Month Day` or `Month Day Year`. Only month-first is accepted, so `20 July`
+    // is refused rather than read the other way round: mixing the two conventions
+    // is what makes `03/04` unreadable, and the same trap applies to names.
+    if (words.length > 3) throw notADate(raw);
+    month = named;
+    day = digits(words[1]!);
+    yearGiven = words.length === 3;
+    year = yearGiven ? digits(words[2]!) : null;
+  } else if (words.length > 1) {
+    // Several words, and the first is not a month name. Nothing else here is
+    // spelt with spaces.
+    throw notADate(raw);
+  } else if (cleaned.includes('-')) {
+    const parts = cleaned.split('-');
+    if (parts.length !== 3) throw notADate(raw);
     [year, month, day] = [digits(parts[0]!), digits(parts[1]!), digits(parts[2]!)];
-  } else if (parts.length === 2 || parts.length === 3) {
-    [month, day] = [digits(parts[0]!), digits(parts[1]!)];
-    // A bare `M/D` means the most recent time that date happened, so `12/28`
-    // typed in early January is last December rather than eleven months ahead.
-    if (parts.length === 3) {
-      year = digits(parts[2]!);
-    } else if (month !== null && day !== null) {
-      year = month > nowMonth || (month === nowMonth && day > nowDay) ? nowYear - 1 : nowYear;
-    } else {
-      year = null;
-    }
+    yearGiven = true;
   } else {
-    throw new DateError(
-      `\`${raw.trim()}\` is not a date I understand. Try \`yesterday\`, \`2026-07-20\`, or \`7/20\`.`,
-    );
+    const parts = cleaned.split('/');
+    if (parts.length !== 2 && parts.length !== 3) throw notADate(raw);
+    [month, day] = [digits(parts[0]!), digits(parts[1]!)];
+    yearGiven = parts.length === 3;
+    year = yearGiven ? digits(parts[2]!) : null;
   }
 
-  if (year === null || month === null || day === null) {
-    throw new DateError(
-      `\`${raw.trim()}\` is not a date I understand. Try \`yesterday\`, \`2026-07-20\`, or \`7/20\`.`,
-    );
-  }
+  if (month === null || day === null || (yearGiven && year === null)) throw notADate(raw);
   // A two-digit year is ambiguous rather than wrong, so it is refused outright
   // instead of being guessed at.
-  if (year < 100) {
+  if (year !== null && year < 100) {
     throw new DateError('Write the year in full, for example `2026-07-20`.');
   }
   if (month < 1 || month > 12) {
     throw new DateError(`There is no month ${month}.`);
   }
-  if (day < 1 || day > daysInMonth(year, month)) {
+  // Checked against the longest any month can be before the year is inferred,
+  // because inferring a year from an impossible day would put a year the user
+  // never wrote into the message explaining what was wrong.
+  if (day < 1 || day > MAX_DAYS_IN_ANY_MONTH) {
+    throw new DateError(`There is no day ${day} in any month.`);
+  }
+  if (year === null) year = mostRecentYear(month, day, now);
+  if (day > daysInMonth(year, month)) {
     throw new DateError(
       `${year}-${String(month).padStart(2, '0')} does not have a day ${day}.`,
     );

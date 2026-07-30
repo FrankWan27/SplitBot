@@ -452,9 +452,92 @@ test('e2e: a dated bill stores the date and echoes back the day it read', async 
   store.close();
 });
 
+/**
+ * A day a fixed number of days before the real clock, since /bill and /edit use
+ * the real one. Returned both as noon-UTC ISO and as the month-name text a user
+ * would type, so the assertion does not depend on the day the suite runs.
+ */
+function daysAgo(days: number): { iso: string; named: string; abbreviated: string } {
+  const now = new Date();
+  const d = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days, 12),
+  );
+  const month = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ][d.getUTCMonth()]!;
+  const rest = `${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  return {
+    iso: d.toISOString(),
+    named: `${month} ${rest}`,
+    abbreviated: `${month.slice(0, 3).toUpperCase()} ${rest}`,
+  };
+}
+
+test('e2e: a bill can be dated by naming the month', async () => {
+  const store = new Store(':memory:');
+  const when = daysAgo(9);
+
+  for (const date of [when.named, when.abbreviated]) {
+    const run = makeInteraction({
+      caller: ALICE,
+      strings: { amount: '10', with: '<@200>', description: 'taxi', date },
+    });
+    await bill.execute(run.interaction, store);
+
+    const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+    assert.equal(entry.occurredAt, when.iso, `${date} should store as noon UTC on that day`);
+
+    // The echo has to agree with what was stored, or the confirmation would tell
+    // the user a different day from the one in the ledger.
+    const echoed = replyText(run.replies[0]!).match(/Dated <t:(\d+):D>/);
+    assert.ok(echoed, `the reply confirms the date it read from ${date}`);
+    assert.equal(Number(echoed[1]) * 1000, Date.parse(when.iso));
+  }
+  store.close();
+});
+
+test('e2e: an edit can move a bill to a date given by month name', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'taxi' });
+  const when = daysAgo(30);
+
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { id },
+    strings: { date: when.abbreviated },
+  });
+  await edit.execute(run.interaction, store);
+
+  assert.equal((store.entryById(GUILD, id) as BillEntry).occurredAt, when.iso);
+  assert.match(replyText(run.replies[0]!), /Date: /, 'the change is reported');
+  // Moving a bill in time moves nothing between people.
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 500);
+  store.close();
+});
+
 test('e2e: a date the parser cannot read is refused and nothing is written', async () => {
   const store = new Store(':memory:');
-  for (const date of ['last tuesday', '2026-13-01', '2026-02-30', '7/20/26', 'soon']) {
+  for (const date of [
+    'last tuesday',
+    '2026-13-01',
+    '2026-02-30',
+    '7/20/26',
+    'soon',
+    '20 July 2026',
+    'julyish 20',
+    'jul',
+  ]) {
     const run = makeInteraction({
       caller: ALICE,
       strings: { amount: '10', with: '<@200>', description: 'x', date },

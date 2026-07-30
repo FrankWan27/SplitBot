@@ -37,7 +37,7 @@ export const data = guildOnly(
     .addStringOption((o) =>
       o
         .setName('date')
-        .setDescription('Change when it happened: yesterday, 2026-07-20, or 7/20'),
+        .setDescription('Change when it happened: yesterday, 2026-07-20, 7/20, or July 20'),
     ),
 );
 

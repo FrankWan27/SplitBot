@@ -49,7 +49,7 @@ export const data = guildOnly(
     .addStringOption((o) =>
       o
         .setName('date')
-        .setDescription('When it happened, if not now: yesterday, 2026-07-20, or 7/20'),
+        .setDescription('When it happened, if not now: yesterday, 2026-07-20, 7/20, or July 20'),
     ),
 );
 

@@ -53,6 +53,78 @@ test('a bare M/D means the most recent time that date happened', () => {
   assert.equal(day('1/1'), '2026-01-01');
 });
 
+test('a month can be named in full or abbreviated, in any case', () => {
+  assert.equal(day('July 24'), '2026-07-24');
+  assert.equal(day('july 24'), '2026-07-24');
+  assert.equal(day('JULY 24'), '2026-07-24');
+  assert.equal(day('Jul 24'), '2026-07-24', 'three letters is the usual abbreviation');
+  assert.equal(day('JUL 24'), '2026-07-24');
+  assert.equal(day('jUl 24'), '2026-07-24');
+});
+
+test('every month is recognised by name and by its first three letters', () => {
+  const names = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  names.forEach((name, i) => {
+    const month = String(i + 1).padStart(2, '0');
+    // The 1st of each month is in the past this year for January to July and last
+    // year beyond that, which is the most-recent-occurrence rule, not a bug.
+    const year = i + 1 <= 7 ? '2026' : '2025';
+    assert.equal(day(`${name} 1`), `${year}-${month}-01`, name);
+    assert.equal(day(`${name.slice(0, 3)} 1`), `${year}-${month}-01`, name.slice(0, 3));
+  });
+  // `May` is its own abbreviation, and `Sept` is common enough to be worth taking.
+  assert.equal(day('Sept 1'), '2025-09-01');
+});
+
+test('a named month with no year means the most recent time it happened', () => {
+  assert.equal(day('Dec 28'), '2025-12-28', 'five months ahead cannot have happened');
+  assert.equal(day('July 28'), '2026-07-28', 'today itself stays in this year');
+  assert.equal(day('July 29'), '2025-07-29', 'tomorrow-ish rolls back a year');
+  assert.equal(day('Jan 1'), '2026-01-01');
+});
+
+test('a named month takes an explicit year, with or without the comma', () => {
+  assert.equal(day('July 20, 2026'), '2026-07-20');
+  assert.equal(day('July 20 2026'), '2026-07-20');
+  assert.equal(day('Dec 25, 2025'), '2025-12-25');
+  assert.equal(day('  jul   20 ,  2026  '), '2026-07-20', 'spacing is not load-bearing');
+  assert.equal(day('Jul. 20'), '2026-07-20', 'an abbreviating period carries no meaning');
+});
+
+test('a named month is validated like a numeric one, not trusted', () => {
+  assert.throws(() => parseDateToIso('Feb 30', NOW), /does not have a day 30/);
+  assert.throws(
+    () => parseDateToIso('Feb 30, 2024', NOW),
+    /does not have a day 30/,
+    'a leap year has no 30th either',
+  );
+  // A day no month has cannot name a year either, so it is refused without one
+  // rather than reported against a year the user never wrote.
+  assert.throws(() => parseDateToIso('Jul 0', NOW), /no day 0 in any month/);
+  assert.throws(() => parseDateToIso('Jul 32', NOW), /no day 32 in any month/);
+  assert.throws(() => parseDateToIso('7/32', NOW), /no day 32 in any month/);
+  assert.throws(() => parseDateToIso('Jul 20, 26', NOW), /year in full/);
+  assert.throws(() => parseDateToIso('Aug 1, 2027', NOW), /future/);
+  assert.throws(() => parseDateToIso('Jul 20, 2019', NOW), /years ago/);
+  // Feb 29 exists in 2024 and not in 2026, and the year-less form has to pick a
+  // real one rather than land on the 29th of a non-leap February.
+  assert.equal(day('Feb 29, 2024'), '2024-02-29');
+  assert.throws(() => parseDateToIso('Feb 29', NOW), /does not have a day 29/);
+});
+
 test('the stored time is noon UTC, so the day holds across UTC-12 to UTC+11', () => {
   const iso = parseDateToIso('2026-07-20', NOW);
   assert.equal(iso, '2026-07-20T12:00:00.000Z');
@@ -133,8 +205,11 @@ test('unparseable input is rejected with an example, not accepted loosely', () =
     '   ',
     'sometime last week',
     'tomorrow',
-    'July 20',
     '20 July 2026',
+    'julyish 20',
+    'jul',
+    'july 20 2026 extra',
+    'janu 4',
     '2026',
     '2026-07',
     '7',
@@ -159,7 +234,17 @@ test('the error message shows what could not be understood', () => {
 });
 
 test('every accepted date lands on noon UTC exactly', () => {
-  for (const raw of ['today', 'yesterday', '2026-07-20', '7/20', '12/25/2025', '2024-02-29']) {
+  for (const raw of [
+    'today',
+    'yesterday',
+    '2026-07-20',
+    '7/20',
+    '12/25/2025',
+    '2024-02-29',
+    'July 20',
+    'JUL 20',
+    'July 20, 2026',
+  ]) {
     const iso = parseDateToIso(raw, NOW);
     assert.match(iso, /T12:00:00\.000Z$/, `${raw} should store as noon UTC`);
   }

@@ -18,19 +18,22 @@ Log a bill and split it evenly.
 | `description` | yes | What it was for, e.g. `dinner at Nopa` |
 | `payer` | no | Who actually paid; defaults to you |
 | `include_payer` | no | Whether the payer shares the cost; defaults to yes |
-| `date` | no | When it happened, if not now; defaults to right now |
+| `date` | no | When it happened, if not now, e.g. `yesterday`, `July 20`; defaults to right now |
 
 ```
 /bill amount:60 with:@bob @carol description:dinner        # you paid $60, they owe $20 each
 /bill amount:45 with:@bob @carol payer:@alice              # alice paid, you are just logging it
 /bill amount:30 with:@bob @carol include_payer:false       # you took no share, they owe $15 each
 /bill amount:24 with:@bob description:taxi date:yesterday  # you forgot at the time
+/bill amount:24 with:@bob description:taxi date:JUL 20     # or name the month
 ```
 
 `description` is required, because `/balances` shows only totals and this is what tells you later what a debt was for.
 
-**Dates.** Discord has no date option type, so `date` is free text: `today`, `yesterday`, `2026-07-20`, `7/20/2026`, or `7/20` (the most recent time that date happened).
-It is parsed digit-by-digit rather than handed to `new Date()`, so a two-digit year, an impossible date like `2026-06-31`, or anything in the future or over five years old is refused rather than guessed at.
+**Dates.** Discord has no date option type, so `date` is free text: `today`, `yesterday`, `2026-07-20`, `7/20/2026`, `7/20`, `July 20`, `JUL 20`, or `July 20, 2026`.
+Month names are matched in full or as the usual three-letter abbreviation, in any case, and a form with no year means the most recent time that date happened - so `12/28` or `Dec 28` typed in July is last December rather than five months ahead.
+Every form is read month-first, matching the `en-US` convention the rest of the bot formats in; `20 July` is refused rather than read the other way round, since mixing the two conventions is what makes `03/04` unreadable.
+It is parsed part-by-part rather than handed to `new Date()`, so a two-digit year, an impossible date like `2026-06-31` or `Feb 30`, or anything in the future or over five years old is refused rather than guessed at.
 The reply echoes back the date it read.
 A backdated bill affects balances immediately; the date only changes where it sits in `/history`.
 
@@ -172,7 +175,7 @@ Change a bill that was already logged.
 | `with` | no | Replace who it was split with |
 | `payer` | no | Change who paid |
 | `include_payer` | no | Whether the payer shares the cost |
-| `date` | no | Change when it happened |
+| `date` | no | Change when it happened; same forms as `/bill` |
 
 ```
 /edit id:31 amount:24.50            # the receipt was more than you remembered
@@ -275,7 +278,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 250 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 258 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

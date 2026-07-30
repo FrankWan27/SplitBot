@@ -10,6 +10,7 @@ import * as edit from '../src/commands/edit.js';
 import * as del from '../src/commands/delete.js';
 import * as restore from '../src/commands/restore.js';
 import { buttonHandlerFor } from '../src/commands/index.js';
+import { MAX_ENTRY_IDS } from '../src/entryIds.js';
 import type { ButtonInteraction, ChatInputCommandInteraction } from 'discord.js';
 
 /**
@@ -1382,6 +1383,26 @@ test('a display name containing a colon does not corrupt the paging state', () =
   assert.equal(parsed?.limit, 5);
 });
 
+test('delete and restore offer id and ids, neither of them required', async () => {
+  // A bad option definition only fails when deploy-commands runs against Discord,
+  // so the shape is asserted here instead. Neither may be required: Discord would
+  // then demand the one the user did not mean to use.
+  const { ApplicationCommandOptionType } = await import('discord.js');
+  for (const cmd of [del, restore]) {
+    const json = cmd.data.toJSON() as {
+      name: string;
+      options?: Array<{ name: string; type: number; required?: boolean }>;
+    };
+    const byName = new Map((json.options ?? []).map((o) => [o.name, o]));
+
+    assert.equal(byName.get('id')?.type, ApplicationCommandOptionType.Integer, `${json.name} id`);
+    assert.equal(byName.get('ids')?.type, ApplicationCommandOptionType.String, `${json.name} ids`);
+    for (const name of ['id', 'ids']) {
+      assert.notEqual(byName.get(name)?.required, true, `${json.name} ${name} must be optional`);
+    }
+  }
+});
+
 test('all commands are registered as guild-only, server-installed', async () => {
   // Declaring this on the command stops Discord offering it in DMs at all,
   // rather than relying on the runtime guard to catch it after the fact.
@@ -1414,6 +1435,11 @@ async function logBill(
   const run = makeInteraction({ caller, strings, users });
   await bill.execute(run.interaction, store);
   return store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0]!.id;
+}
+
+/** An interaction naming several entries through the `ids` option. */
+function idsRun(caller: FakeUser, ids: string) {
+  return makeInteraction({ caller, strings: { ids } });
 }
 
 test('e2e: deleting a bill undoes exactly the balances it created', async () => {
@@ -1493,6 +1519,179 @@ test('e2e: deleting a payment puts the debt back', async () => {
   await del.execute(run.interaction, store);
   assert.match(replyText(run.replies[0]!), /from <@200> to <@100>/);
   assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000, 'the debt is owed again');
+  store.close();
+});
+
+test('e2e: ids deletes several at once, undoing each of their balances', async () => {
+  const store = new Store(':memory:');
+  const a = await logBill(store, { amount: '30', with: '<@200> <@300>', description: 'dinner' });
+  const b = await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  const keep = await logBill(store, { amount: '8', with: '<@200>', description: 'bagel' });
+  // Alice pays and shares, so dinner is 3 ways and the other two are 2 ways.
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000 + 500 + 400);
+
+  const run = idsRun(ALICE, `${a},${b}`);
+  await del.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Deleted 2 entries/);
+  // Each line has to name its id: once they are gone from /history there is
+  // nothing else to tell the reader which entry was which.
+  assert.match(text, /`#1`.*dinner/);
+  assert.match(text, /`#2`.*coffee/);
+  assert.match(text, new RegExp(`/restore ids:${a},${b}`), 'the undo hint names them all');
+
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 400, 'only the bagel is left');
+  assert.equal(store.owedBetween(GUILD, CAROL.id, ALICE.id), 0);
+  assert.equal(store.entryById(GUILD, keep)?.voidedAt, null, 'an unnamed entry is untouched');
+  store.close();
+});
+
+test('e2e: restoring several at once puts every balance back exactly', async () => {
+  const store = new Store(':memory:');
+  // Uneven totals, so a restore that re-split rather than reusing the stored
+  // shares would land a spare penny on the wrong person and be caught here.
+  const a = await logBill(store, { amount: '10', with: '<@200> <@300>', description: 'dinner' });
+  const b = await logBill(store, { amount: '20', with: '<@200> <@300>', description: 'lunch' });
+  const before = store.allBalances(GUILD);
+
+  await del.execute(idsRun(ALICE, `${a},${b}`).interaction, store);
+  assert.deepEqual(store.allBalances(GUILD), []);
+
+  const run = idsRun(BOB, `${a},${b}`);
+  await restore.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /Restored 2 entries/);
+  assert.deepEqual(store.allBalances(GUILD), before, 'restored penny-for-penny');
+  store.close();
+});
+
+test('e2e: one bad id in a batch deletes nothing at all', async () => {
+  const store = new Store(':memory:');
+  const a = await logBill(store, { amount: '30', with: '<@200>', description: 'dinner' });
+  const b = await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  const before = store.allBalances(GUILD);
+
+  // 999 comes last, so the two valid ids ahead of it have already been voided
+  // inside the transaction by the time it fails. Nothing may survive that.
+  const run = idsRun(ALICE, `${a},${b},999`);
+  await assert.rejects(() => del.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /no entry `#999`/);
+    assert.match(err.message, /Nothing was deleted/, 'says the batch did not go through');
+    return true;
+  });
+
+  assert.deepEqual(store.allBalances(GUILD), before, 'balances are exactly as they were');
+  assert.equal(store.entryById(GUILD, a)?.voidedAt, null, 'the ids before the bad one survive');
+  assert.equal(store.entryById(GUILD, b)?.voidedAt, null);
+  store.close();
+});
+
+test('e2e: a batch that names an already-deleted entry rolls the rest back', async () => {
+  const store = new Store(':memory:');
+  const gone = await logBill(store, { amount: '30', with: '<@200>', description: 'dinner' });
+  const live = await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  await del.execute(makeInteraction({ caller: ALICE, integers: { id: gone } }).interaction, store);
+  const before = store.allBalances(GUILD);
+
+  const run = idsRun(ALICE, `${live},${gone}`);
+  await assert.rejects(() => del.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, /already deleted/);
+    assert.match(err.message, /Nothing was deleted/);
+    return true;
+  });
+  assert.deepEqual(store.allBalances(GUILD), before);
+  assert.equal(store.entryById(GUILD, live)?.voidedAt, null);
+  store.close();
+});
+
+test('e2e: ids collapses duplicates rather than deleting twice', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  // The second mention must not be treated as a separate delete: that would hit
+  // the already-deleted check and refuse a request that is perfectly clear.
+  const run = idsRun(ALICE, `${id}, ${id}`);
+  await del.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /Deleted #1/, 'one entry, so the single-id wording');
+  assert.deepEqual(store.allBalances(GUILD), []);
+  store.close();
+});
+
+test('e2e: a single id given through ids reads as one entry, not a batch', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  const run = idsRun(ALICE, `#${id}`);
+  await del.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+  assert.match(text, /Deleted #1/);
+  assert.match(text, new RegExp(`/restore id:${id}`), 'hints the single-entry option');
+  assert.doesNotMatch(text, /`#1` \*\*/, 'no id prefix on the only line');
+  store.close();
+});
+
+test('e2e: id and ids together is refused rather than guessed at', async () => {
+  const store = new Store(':memory:');
+  const a = await logBill(store, { amount: '30', with: '<@200>', description: 'dinner' });
+  const b = await logBill(store, { amount: '10', with: '<@200>', description: 'coffee' });
+  const before = store.allBalances(GUILD);
+
+  for (const cmd of [del, restore]) {
+    const run = makeInteraction({ caller: ALICE, integers: { id: a }, strings: { ids: String(b) } });
+    await assert.rejects(() => cmd.execute(run.interaction, store), (err: unknown) => {
+      assert.ok(err instanceof UserError);
+      assert.match(err.message, /not both/);
+      return true;
+    });
+  }
+  assert.deepEqual(store.allBalances(GUILD), before);
+  store.close();
+});
+
+test('e2e: naming no id at all explains both ways to name one', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  for (const cmd of [del, restore]) {
+    const run = makeInteraction({ caller: ALICE });
+    await assert.rejects(() => cmd.execute(run.interaction, store), (err: unknown) => {
+      assert.ok(err instanceof UserError);
+      assert.match(err.message, /id:7/);
+      assert.match(err.message, /ids:7,9/);
+      return true;
+    });
+  }
+  store.close();
+});
+
+test('ids rejects anything that is not a plain whole number', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '10', with: '<@200>', description: 'dinner' });
+
+  // Number() would take all of these; none is an id anybody meant to type, and
+  // silently rounding one would delete an entry the user never named.
+  for (const bad of ['1.5', '0x1', '1e3', '+1', '-1', '0', 'abc', '1,,two']) {
+    const run = idsRun(ALICE, bad);
+    await assert.rejects(() => del.execute(run.interaction, store), (err: unknown) => {
+      assert.ok(err instanceof UserError, `${bad} should raise a UserError`);
+      assert.match(err.message, /is not an entry id|Ids start at 1/);
+      return true;
+    });
+  }
+  assert.deepEqual(store.allBalances(GUILD), [{ creditor: '100', debtor: '200', cents: 500 }]);
+  store.close();
+});
+
+test('ids refuses a batch larger than the cap', async () => {
+  const store = new Store(':memory:');
+  const tooMany = Array.from({ length: MAX_ENTRY_IDS + 1 }, (_, i) => i + 1).join(',');
+  const run = idsRun(ALICE, tooMany);
+  await assert.rejects(() => del.execute(run.interaction, store), (err: unknown) => {
+    assert.ok(err instanceof UserError);
+    assert.match(err.message, new RegExp(`most I can act on at once is ${MAX_ENTRY_IDS}`));
+    return true;
+  });
   store.close();
 });
 

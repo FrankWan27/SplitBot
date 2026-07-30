@@ -78,6 +78,27 @@ export interface PaymentEntry extends EntryMeta {
 export type LedgerEntry = BillEntry | PaymentEntry;
 
 /**
+ * The outcome of a batch delete or restore.
+ *
+ * A failure names the one id that stopped it rather than returning per-id results,
+ * because the batch is all or nothing: on failure nothing was written, so there is
+ * no partial outcome to report.
+ */
+export type BatchResult =
+  | { ok: true; entries: LedgerEntry[] }
+  | { ok: false; failedId: number };
+
+/**
+ * Thrown inside a batch to roll it back. Internal to `Store` - it never escapes,
+ * because `transactBatch` converts it into a `BatchResult`.
+ */
+class BatchAbort extends Error {
+  constructor(readonly failedId: number) {
+    super(`entry ${failedId} cannot be processed`);
+  }
+}
+
+/**
  * When an entry happened, for display and ordering. A backdated bill reports the
  * date it was given; everything else reports when it was logged.
  */
@@ -459,51 +480,107 @@ export class Store {
 
   /**
    * Delete an entry: reverse its effect on balances and mark the row voided.
+   * Must be called inside a transaction.
    *
    * The row is kept rather than removed, so the audit log still records that the
    * entry existed and that somebody deleted it. Returns the entry as it stood, or
    * null if it does not exist or was already deleted - both of which the caller
    * has to report differently, so they are distinguished by `entryById`.
    */
-  voidEntry(args: {
+  private voidOne(args: {
     guildId: string;
     id: number;
     voidedBy: string;
     voidedAt: string;
   }): LedgerEntry | null {
-    return this.transact(() => {
-      const entry = this.entryById(args.guildId, args.id);
-      if (!entry || entry.voidedAt !== null) return null;
+    const entry = this.entryById(args.guildId, args.id);
+    if (!entry || entry.voidedAt !== null) return null;
 
-      this.reverseEffect(args.guildId, entry);
-      this.db
-        .prepare('UPDATE entries SET voided_at = ?, voided_by = ? WHERE guild_id = ? AND id = ?')
-        .run(args.voidedAt, args.voidedBy, args.guildId, args.id);
-      return entry;
-    });
+    this.reverseEffect(args.guildId, entry);
+    this.db
+      .prepare('UPDATE entries SET voided_at = ?, voided_by = ? WHERE guild_id = ? AND id = ?')
+      .run(args.voidedAt, args.voidedBy, args.guildId, args.id);
+    return entry;
   }
 
   /**
    * Restore a deleted entry, re-applying the balances it had accounted for.
+   * Must be called inside a transaction.
    *
-   * The counterpart to `voidEntry`, which is what makes an accidental delete
+   * The counterpart to `voidOne`, which is what makes an accidental delete
    * recoverable rather than something to be corrected with an offsetting bill.
    */
-  restoreEntry(args: { guildId: string; id: number }): LedgerEntry | null {
-    return this.transact(() => {
-      const entry = this.entryById(args.guildId, args.id);
-      if (!entry || entry.voidedAt === null) return null;
+  private restoreOne(args: { guildId: string; id: number }): LedgerEntry | null {
+    const entry = this.entryById(args.guildId, args.id);
+    if (!entry || entry.voidedAt === null) return null;
 
-      // Re-applying is reversing the reversal, so the same helper serves both
-      // directions and cannot disagree with itself.
-      this.reverseEffect(args.guildId, negated(entry));
-      this.db
-        .prepare(
-          'UPDATE entries SET voided_at = NULL, voided_by = NULL WHERE guild_id = ? AND id = ?',
-        )
-        .run(args.guildId, args.id);
-      return entry;
-    });
+    // Re-applying is reversing the reversal, so the same helper serves both
+    // directions and cannot disagree with itself.
+    this.reverseEffect(args.guildId, negated(entry));
+    this.db
+      .prepare(
+        'UPDATE entries SET voided_at = NULL, voided_by = NULL WHERE guild_id = ? AND id = ?',
+      )
+      .run(args.guildId, args.id);
+    return entry;
+  }
+
+  /**
+   * Delete several entries, applying the single-entry delete to each in turn.
+   *
+   * All or nothing. One unusable id abandons the whole batch and reports which id
+   * it was, rather than voiding the ids either side of it: a partly-applied delete
+   * would leave the caller working out which half of what they typed took effect,
+   * and the ids they would need to finish the job are the ones already gone from
+   * `/history`. One transaction around the whole loop is what delivers that, and
+   * it is also why the per-entry work is factored out un-transacted - SQLite has
+   * no nested `BEGIN`.
+   */
+  voidEntries(args: {
+    guildId: string;
+    ids: number[];
+    voidedBy: string;
+    voidedAt: string;
+  }): BatchResult {
+    return this.transactBatch(args.ids, (id) =>
+      this.voidOne({ guildId: args.guildId, id, voidedBy: args.voidedBy, voidedAt: args.voidedAt }),
+    );
+  }
+
+  /** Restore several deleted entries. All or nothing, as with `voidEntries`. */
+  restoreEntries(args: { guildId: string; ids: number[] }): BatchResult {
+    return this.transactBatch(args.ids, (id) =>
+      this.restoreOne({ guildId: args.guildId, id }),
+    );
+  }
+
+  /**
+   * Apply a single-entry operation to each of `ids` in one transaction, stopping
+   * at the first one it refuses.
+   *
+   * The throw is what triggers the rollback, so the ids processed before the bad
+   * one are undone by the same machinery that guards every other write, rather
+   * than by a compensating pass that could itself fail partway.
+   */
+  private transactBatch(
+    ids: number[],
+    apply: (id: number) => LedgerEntry | null,
+  ): BatchResult {
+    try {
+      return {
+        ok: true,
+        entries: this.transact(() =>
+          ids.map((id) => {
+            const entry = apply(id);
+            if (!entry) throw new BatchAbort(id);
+            return entry;
+          }),
+        ),
+      };
+    } catch (err) {
+      if (err instanceof BatchAbort) return { ok: false, failedId: err.failedId };
+      throw err;
+    }
   }
 
   /**

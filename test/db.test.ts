@@ -225,6 +225,146 @@ test('a bill excluding the payer charges participants their full share', () => {
   s.close();
 });
 
+/** Every id currently in the ledger, oldest first. */
+function ids(s: Store): number[] {
+  return s
+    .recentEntries({ guildId: G, limit: 100, includeVoided: true })
+    .entries.map((e) => e.id)
+    .reverse();
+}
+
+test('voidEntries reverses every named entry and leaves the rest alone', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  bill(s, alice, 1000, [alice, bob]);
+  bill(s, alice, 500, [alice, bob]);
+  const [first, second, third] = ids(s) as [number, number, number];
+  assert.equal(s.owedBetween(G, bob, alice), 1500 + 500 + 250);
+
+  const result = s.voidEntries({ guildId: G, ids: [first, second], voidedBy: bob, voidedAt: AT });
+  assert.ok(result.ok);
+  assert.deepEqual(result.entries.map((e) => e.id), [first, second]);
+  assert.equal(s.owedBetween(G, bob, alice), 250, 'only the third bill still counts');
+  assert.equal(s.entryById(G, third)?.voidedAt, null);
+  // Who deleted it is recorded on every row in the batch, not just the first.
+  assert.equal(s.entryById(G, second)?.voidedBy, bob);
+  s.close();
+});
+
+test('voidEntries is all or nothing when one id is unusable', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  bill(s, alice, 1000, [alice, bob]);
+  const [first, second] = ids(s) as [number, number];
+  const before = s.allBalances(G);
+
+  // The bad id is last, so the two ahead of it are already voided inside the
+  // transaction when it fails. The rollback is what has to undo them.
+  const result = s.voidEntries({
+    guildId: G,
+    ids: [first, second, 9999],
+    voidedBy: bob,
+    voidedAt: AT,
+  });
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok && result.failedId === 9999, 'names the id that stopped it');
+  assert.deepEqual(s.allBalances(G), before);
+  assert.equal(s.entryById(G, first)?.voidedAt, null);
+  assert.equal(s.entryById(G, second)?.voidedAt, null);
+  s.close();
+});
+
+test('voidEntries refuses a batch containing an already-voided entry', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  bill(s, alice, 1000, [alice, bob]);
+  const [first, second] = ids(s) as [number, number];
+  s.voidEntries({ guildId: G, ids: [first], voidedBy: bob, voidedAt: AT });
+  const before = s.allBalances(G);
+
+  const result = s.voidEntries({
+    guildId: G,
+    ids: [second, first],
+    voidedBy: bob,
+    voidedAt: AT,
+  });
+  assert.ok(!result.ok && result.failedId === first);
+  assert.deepEqual(s.allBalances(G), before, 'the live entry was not voided either');
+  assert.equal(s.entryById(G, second)?.voidedAt, null);
+  s.close();
+});
+
+test('restoreEntries puts back exactly what voidEntries removed', () => {
+  const s = fresh();
+  // An uneven total, so restoring the stored shares rather than re-splitting is
+  // what makes the balances come back identical.
+  bill(s, alice, 1000, [alice, bob, carol]);
+  bill(s, alice, 2000, [alice, bob, carol]);
+  const [first, second] = ids(s) as [number, number];
+  const before = s.allBalances(G);
+
+  s.voidEntries({ guildId: G, ids: [first, second], voidedBy: bob, voidedAt: AT });
+  assert.deepEqual(s.allBalances(G), []);
+
+  const result = s.restoreEntries({ guildId: G, ids: [first, second] });
+  assert.ok(result.ok);
+  assert.deepEqual(s.allBalances(G), before, 'restored penny for penny');
+  assert.equal(s.entryById(G, first)?.voidedAt, null);
+  assert.equal(s.entryById(G, first)?.voidedBy, null, 'the deleter is cleared too');
+  s.close();
+});
+
+test('restoreEntries rolls back entirely when one id is not deleted', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  bill(s, alice, 1000, [alice, bob]);
+  const [first, second] = ids(s) as [number, number];
+  s.voidEntries({ guildId: G, ids: [first], voidedBy: bob, voidedAt: AT });
+  const before = s.allBalances(G);
+
+  // `second` is live, so restoring it is meaningless and must abandon the batch
+  // rather than double-apply the balances of `first`.
+  const result = s.restoreEntries({ guildId: G, ids: [first, second] });
+  assert.ok(!result.ok && result.failedId === second);
+  assert.deepEqual(s.allBalances(G), before, 'balances must not double up');
+  assert.ok(s.entryById(G, first)?.voidedAt, 'the deleted entry is still deleted');
+  s.close();
+});
+
+test('an empty batch is a no-op rather than an error', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  const before = s.allBalances(G);
+
+  const result = s.voidEntries({ guildId: G, ids: [], voidedBy: bob, voidedAt: AT });
+  assert.ok(result.ok);
+  assert.deepEqual(result.entries, []);
+  assert.deepEqual(s.allBalances(G), before);
+  s.close();
+});
+
+test('a batch cannot reach into another guild', () => {
+  const s = fresh();
+  bill(s, alice, 3000, [alice, bob]);
+  const [mine] = ids(s) as [number];
+  s.recordBill({
+    guildId: 'guild-2',
+    payerId: alice,
+    totalCents: 1000,
+    splits: [{ userId: bob, shareCents: 1000 }],
+    description: 'theirs',
+    createdBy: alice,
+    createdAt: AT,
+  });
+  const theirs = s.recentEntries({ guildId: 'guild-2', limit: 1 }).entries[0]!.id;
+
+  const result = s.voidEntries({ guildId: G, ids: [mine, theirs], voidedBy: bob, voidedAt: AT });
+  assert.ok(!result.ok && result.failedId === theirs, 'the other guild\'s id does not exist here');
+  assert.equal(s.entryById(G, mine)?.voidedAt, null);
+  assert.equal(s.entryById('guild-2', theirs)?.voidedAt, null);
+  s.close();
+});
+
 test('data survives reopening the same database file', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

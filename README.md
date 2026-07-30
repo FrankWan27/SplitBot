@@ -150,15 +150,28 @@ Payments cannot be edited - use `/delete` plus a corrected `/settle`.
 ### `/delete` and `/restore`
 
 Delete an entry and undo its effect on balances, or bring it back.
-Both take the `id` from `/history`.
+
+| Option | Meaning |
+|---|---|
+| `id` | One entry, e.g. `31` |
+| `ids` | Several entries, comma separated, e.g. `31,32` |
 
 ```
 /delete id:31
+/delete ids:31,32,35
 /restore id:31
+/restore ids:31,32
 ```
+
+Give one or the other, not both.
+`ids` also accepts spaces and the `#` that `/history` prints, so `ids:#31 #32` works; repeats collapse, and at most 25 entries can be named at once.
 
 The row is marked deleted rather than removed, so the ledger stays an append-only record of what happened, including who deleted what.
 A restore reproduces the original balances penny for penny, because it re-applies the *stored* shares rather than re-splitting the total.
+
+**A batch is all or nothing.**
+If any id in `ids` does not exist, or is already in the state you asked for, nothing is deleted or restored and the reply names the id that stopped it.
+A half-applied delete would leave you working out which entries went through, and the ids you would need to finish the job are the ones already gone from `/history`.
 
 **Anyone in the server can edit, delete, and restore anything.**
 The bot is for a group of friends who already trust each other with the ledger, and the log records who did what.

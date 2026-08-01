@@ -9,6 +9,7 @@ import { UserError } from '../errors.js';
 import { parseDateToIso } from '../dates.js';
 import { formatCents, parseAmountToCents, splitEvenly } from '../money.js';
 import { parseMentionIds, resolveParticipants } from '../participants.js';
+import { visibility } from '../visibility.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -144,5 +145,5 @@ export async function execute(
     )
     .addFields({ name: 'Who owes what', value: owedLines.join('\n') });
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
 }

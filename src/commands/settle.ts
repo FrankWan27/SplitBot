@@ -8,6 +8,7 @@ import type { Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { formatCents, parseAmountToCents } from '../money.js';
+import { visibility } from '../visibility.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -99,5 +100,5 @@ export async function execute(
       });
   }
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
 }

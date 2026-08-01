@@ -8,6 +8,7 @@ import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { summarise } from './delete.js';
 import { ID_OPTION_NAME, IDS_OPTION_NAME, readEntryIds } from '../entryIds.js';
+import { visibility } from '../visibility.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -73,5 +74,5 @@ export async function execute(
       `${summariseAll(entries)}\n\n${one ? 'Its' : 'Their'} balances are back in effect.`,
     );
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
 }

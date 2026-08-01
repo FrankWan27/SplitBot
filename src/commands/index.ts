@@ -4,6 +4,7 @@ import type {
   SlashCommandOptionsOnlyBuilder,
 } from 'discord.js';
 import type { Store } from '../db.js';
+import { withPrivateOption } from '../visibility.js';
 import * as bill from './bill.js';
 import * as balances from './balances.js';
 import * as settle from './settle.js';
@@ -18,6 +19,15 @@ export interface Command {
 }
 
 export const commands: Command[] = [bill, balances, settle, history, edit, del, restore];
+
+// Every command can reply privately, so the flag is added once here rather than
+// declared seven times. Declaring it per command would let the name, description
+// or default drift between them, and a flag that means subtly different things
+// depending on which command carries it is worse than no flag at all.
+//
+// This mutates each builder in place, which is what `addBooleanOption` does
+// anyway; the exported `data` objects are the same ones `deploy-commands` reads.
+for (const command of commands) withPrivateOption(command.data);
 
 export const commandsByName = new Map(commands.map((c) => [c.data.name, c]));
 

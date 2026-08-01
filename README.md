@@ -5,6 +5,9 @@ Log what someone paid, split it evenly across whoever was there, see who owes wh
 
 Replies are titled by category: 💳 bill, 💰 balances, ✅ payment, 🕓 history, and ✏️ 🗑️ ♻️ for edit, delete, and restore.
 
+Every command takes `private:true`, which shows the reply to you alone instead of posting it to the channel.
+See [Private replies](#private-replies).
+
 ## Commands
 
 ### `/bill`
@@ -19,6 +22,7 @@ Log a bill and split it evenly.
 | `payer` | no | Who actually paid; defaults to you |
 | `include_payer` | no | Whether the payer shares the cost; defaults to yes |
 | `date` | no | When it happened, if not now, e.g. `yesterday`, `July 20`; defaults to right now |
+| `private` | no | Show the reply only to you; defaults to no |
 
 ```
 /bill amount:60 with:@bob @carol description:dinner        # you paid $60, they owe $20 each
@@ -45,6 +49,7 @@ Show outstanding debts, largest first.
 |---|---|---|
 | `user` | no | Only show debts involving this person, plus their net position |
 | `details` | no | List the bills and payments each balance is made of; defaults to no |
+| `private` | no | Show the reply only to you; defaults to no |
 
 ```
 /balances                    # everyone in the server
@@ -83,6 +88,7 @@ Record a payment from one person to another.
 | `to` | yes | Who is being paid |
 | `amount` | no | How much; omit to clear the whole balance |
 | `from` | no | Who paid; defaults to you |
+| `private` | no | Show the reply only to you; defaults to no |
 
 ```
 /settle to:@alice              # pay off everything you owe alice
@@ -103,6 +109,7 @@ Show recently logged bills, newest first.
 | `bills` | no | Show bills; defaults to yes |
 | `payments` | no | Show payments between people; defaults to no |
 | `show_deleted` | no | Also list deleted entries, struck through; defaults to no |
+| `private` | no | Show the reply only to you; defaults to no |
 
 ```
 /history                              # last 5 bills in this server
@@ -176,6 +183,7 @@ Change a bill that was already logged.
 | `payer` | no | Change who paid |
 | `include_payer` | no | Whether the payer shares the cost |
 | `date` | no | Change when it happened; same forms as `/bill` |
+| `private` | no | Show the reply only to you; defaults to no |
 
 ```
 /edit id:31 amount:24.50            # the receipt was more than you remembered
@@ -202,6 +210,7 @@ Delete an entry and undo its effect on balances, or bring it back.
 |---|---|
 | `id` | One entry, e.g. `31` |
 | `ids` | Several entries, comma separated, e.g. `31,32` |
+| `private` | Show the reply only to you; defaults to no |
 
 ```
 /delete id:31
@@ -222,6 +231,27 @@ A half-applied delete would leave you working out which entries went through, an
 
 **Anyone in the server can edit, delete, and restore anything.**
 The bot is for a group of friends who already trust each other with the ledger, and the log records who did what.
+
+## Private replies
+
+Every command takes `private`, which sends the reply to you alone rather than to the channel.
+
+```
+/balances private:true                       # check what you owe without telling the room
+/history user:@bob private:true
+/bill amount:60 with:@bob description:dinner private:true
+```
+
+Discord calls this an ephemeral message: only you can see it, nobody else in the channel is aware it happened, and it disappears when you dismiss it or restart your client.
+
+It changes who sees the reply, not what the reply says or does.
+A private `/bill` still moves the balances and still shows up in everyone's `/history`, because the ledger is shared even when the confirmation is not.
+A private `/balances` shows the same figures a public one would, rather than quietly narrowing to just you - name yourself in `user` for that.
+
+`/history` keeps working paging buttons when private, since an ephemeral message can still be edited in place for the person it was sent to.
+
+The option is added to all seven commands from one place in `src/commands/index.ts` rather than declared in each, so its name, description, and default cannot drift apart between commands.
+Error messages have always been private, and stay that way regardless of the flag - nobody else needs to read them.
 
 ## Setup
 
@@ -278,7 +308,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 258 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 266 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

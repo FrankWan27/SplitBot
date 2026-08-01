@@ -10,7 +10,7 @@ import * as history from '../src/commands/history.js';
 import * as edit from '../src/commands/edit.js';
 import * as del from '../src/commands/delete.js';
 import * as restore from '../src/commands/restore.js';
-import { buttonHandlerFor } from '../src/commands/index.js';
+import { buttonHandlerFor, commands } from '../src/commands/index.js';
 import { MAX_ENTRY_IDS } from '../src/entryIds.js';
 import type { ButtonInteraction, ChatInputCommandInteraction } from 'discord.js';
 
@@ -2729,4 +2729,192 @@ test('e2e: each kind of reply is prefixed with its own emoji', async () => {
   assert.match(seen.get('delete')!, /^🗑️ /);
   assert.match(seen.get('restore')!, /^♻️ /);
   store.close();
+});
+
+/**
+ * `private:true` is what keeps a ledger usable in a busy channel, so it is checked
+ * on every command rather than on a sample: a command that quietly ignored the flag
+ * would post someone's balances to the room after they asked it not to, which is
+ * the one failure mode the flag exists to prevent.
+ */
+
+/** Every command, as a callable that returns the reply it produced. */
+function everyCommand(
+  store: Store,
+  id: number,
+  booleans: Record<string, boolean>,
+): [string, () => Promise<Reply>][] {
+  const run = async (
+    execute: (i: ChatInputCommandInteraction, s: Store) => Promise<void>,
+    args: Parameters<typeof makeInteraction>[0],
+  ): Promise<Reply> => {
+    const r = makeInteraction(args);
+    await execute(r.interaction, store);
+    return r.replies[0]!;
+  };
+
+  return [
+    ['bill', () =>
+      run(bill.execute, {
+        caller: ALICE,
+        strings: { amount: '5', with: '<@300>', description: 'coffee' },
+        booleans,
+      })],
+    ['balances', () => run(balances.execute, { caller: ALICE, booleans })],
+    ['history', () => run(history.execute, { caller: ALICE, booleans })],
+    ['settle', () => run(settle.execute, { caller: BOB, users: { to: ALICE }, booleans })],
+    ['edit', () =>
+      run(edit.execute, { caller: ALICE, integers: { id }, strings: { amount: '30' }, booleans })],
+    ['delete', () => run(del.execute, { caller: ALICE, integers: { id }, booleans })],
+    ['restore', () => run(restore.execute, { caller: ALICE, integers: { id }, booleans })],
+  ];
+}
+
+/** The value Discord reads as "show this to the invoking user only". */
+const EPHEMERAL = 64;
+
+test('e2e: private:true keeps every command reply to the caller alone', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  for (const [name, run] of everyCommand(store, id, { private: true })) {
+    const reply = await run();
+    assert.equal(reply.flags, EPHEMERAL, `/${name} should reply privately`);
+    // The flag must not cost the reply its content: an ephemeral message carries
+    // embeds exactly as a public one does.
+    assert.ok(reply.embeds?.[0], `/${name} should still answer, not just go quiet`);
+  }
+  store.close();
+});
+
+test('e2e: replies are public unless private is asked for', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  // Omitted and explicitly false have to behave the same, since a shared ledger
+  // being visible is the whole point of the bot.
+  const cases: Record<string, boolean>[] = [{}, { private: false }];
+  for (const booleans of cases) {
+    for (const [name, run] of everyCommand(store, id, booleans)) {
+      const reply = await run();
+      assert.equal(
+        reply.flags,
+        undefined,
+        `/${name} should stay public with ${JSON.stringify(booleans)}`,
+      );
+    }
+  }
+  store.close();
+});
+
+test('e2e: a private reply still writes to the ledger like a public one', async () => {
+  const store = new Store(':memory:');
+  // Who can see the reply is a display concern; it must not reach the ledger.
+  const run = makeInteraction({
+    caller: ALICE,
+    strings: { amount: '20', with: '<@200>', description: 'dinner' },
+    booleans: { private: true },
+  });
+  await bill.execute(run.interaction, store);
+
+  assert.equal(store.owedBetween(GUILD, BOB.id, ALICE.id), 1000, 'the debt is real either way');
+  const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
+  assert.equal(entry.description, 'dinner');
+  store.close();
+});
+
+test('e2e: a private /balances shows the same figures as a public one', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  const open = makeInteraction({ caller: ALICE });
+  await balances.execute(open.interaction, store);
+  const shut = makeInteraction({ caller: ALICE, booleans: { private: true } });
+  await balances.execute(shut.interaction, store);
+
+  // Privacy changes the audience, not the answer. A private listing that quietly
+  // filtered to the caller would read as a bug in the balances themselves.
+  assert.equal(replyText(shut.replies[0]!), replyText(open.replies[0]!));
+  store.close();
+});
+
+test('e2e: a private /history keeps working paging buttons', async () => {
+  const store = new Store(':memory:');
+  for (let i = 0; i < 4; i++) {
+    await logBill(store, { amount: '10', with: '<@200>', description: `entry ${i}` });
+  }
+
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { count: 2 },
+    booleans: { private: true },
+  });
+  await history.execute(run.interaction, store);
+  assert.equal(run.replies[0]!.flags, EPHEMERAL);
+
+  // An ephemeral message can still be edited in place by the person it was sent
+  // to, so the buttons are not decoration.
+  const older = buttonsOf(run.replies[0]!).find((b) => b.label === 'Older');
+  assert.ok(older, 'a private listing still gets paging buttons');
+  assert.equal(older.disabled, false);
+
+  const click = makeButtonClick(older.custom_id);
+  await history.handleButton(click.interaction, store);
+  assert.match(replyText(click.updates[0]!), /entry 1/, 'page two arrives');
+  store.close();
+});
+
+test('e2e: an empty /balances honours private too', async () => {
+  const store = new Store(':memory:');
+  // The all-settled reply is built on its own path, so it needs checking
+  // separately or it would be the one reply that leaked.
+  const run = makeInteraction({ caller: ALICE, booleans: { private: true } });
+  await balances.execute(run.interaction, store);
+
+  assert.equal(run.replies[0]!.flags, EPHEMERAL);
+  assert.match(replyText(run.replies[0]!), /All settled up/);
+  store.close();
+});
+
+test('e2e: a private /settle with nothing owed stays private', async () => {
+  const store = new Store(':memory:');
+  // This path replies with plain content rather than an embed, and was already
+  // ephemeral before the flag existed - so it must not end up doubly flagged or
+  // suddenly public.
+  const run = makeInteraction({ caller: ALICE, users: { to: BOB }, booleans: { private: true } });
+  await settle.execute(run.interaction, store);
+
+  assert.equal(run.replies[0]!.flags, EPHEMERAL);
+  assert.match(replyText(run.replies[0]!), /does not owe/);
+  store.close();
+});
+
+test('every registered command actually declares the private option', () => {
+  // The tests above drive handlers through a fake options object, so they would
+  // pass even if the flag were never registered with Discord. This reads the
+  // definitions that `deploy-commands` sends, which is what decides whether a user
+  // can type `private:` at all.
+  for (const command of commands) {
+    const json = command.data.toJSON() as {
+      name: string;
+      options?: { name: string; type: number; required?: boolean }[];
+    };
+    const options = json.options ?? [];
+    const flag = options.filter((o) => o.name === 'private');
+
+    assert.equal(flag.length, 1, `/${json.name} should declare private exactly once`);
+    // 5 is Discord's boolean option type, so the picker offers True/False rather
+    // than a free-text box.
+    assert.equal(flag[0]!.type, 5, `/${json.name} private should be a boolean`);
+    assert.notEqual(flag[0]!.required, true, `/${json.name} private must stay optional`);
+
+    // Discord rejects a command whose required options do not all come first, so
+    // appending an optional flag has to leave that ordering intact.
+    const lastRequired = options.map((o) => o.required === true).lastIndexOf(true);
+    const firstOptional = options.findIndex((o) => o.required !== true);
+    assert.ok(
+      firstOptional === -1 || lastRequired < firstOptional,
+      `/${json.name} has an optional option before a required one`,
+    );
+  }
 });

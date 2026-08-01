@@ -12,6 +12,7 @@ import { dayHeading, dayKey, displayTimeZone } from '../dates.js';
 import { UserError } from '../errors.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
+import { visibility } from '../visibility.js';
 
 const DEFAULT_COUNT = 5;
 const MAX_COUNT = 25;
@@ -447,7 +448,9 @@ export async function execute(
     store,
   );
 
-  await interaction.reply(page);
+  // A private listing keeps its buttons: an ephemeral message can be edited in
+  // place by whoever it was sent to, so paging works exactly as it does publicly.
+  await interaction.reply({ ...visibility(interaction), ...page });
 }
 
 /** Handles a click on one of the paging buttons by editing the message in place. */

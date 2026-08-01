@@ -6,6 +6,7 @@ import {
 import { entryWhen, type PairBalance, type PairContribution, type Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
+import { visibility } from '../visibility.js';
 
 /** Discord rejects embed descriptions over 4096 characters. */
 const MAX_LINES = 40;
@@ -161,6 +162,7 @@ export async function execute(
 
   if (balances.length === 0) {
     await interaction.reply({
+      ...visibility(interaction),
       embeds: [
         new EmbedBuilder()
           .setColor(0x4f9d69)
@@ -213,5 +215,5 @@ export async function execute(
     });
   }
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
 }

@@ -7,6 +7,7 @@ import type { LedgerEntry, Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { formatCents } from '../money.js';
+import { visibility } from '../visibility.js';
 import {
   ID_OPTION_NAME,
   IDS_OPTION_NAME,
@@ -114,5 +115,5 @@ export async function execute(
       } never happened. ${one ? 'It is' : 'They are'} kept in the log, so \`${undo}\` undoes this.`,
     );
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
 }

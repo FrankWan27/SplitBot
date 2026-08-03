@@ -4,9 +4,21 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import { entryWhen, type PairBalance, type PairContribution, type Store } from '../db.js';
+import { UserError } from '../errors.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import { capitalise, verb, who, type Voice } from '../voice.js';
+
+/**
+ * A bare `/balances` shows the caller their own debts, privately.
+ *
+ * That is what the command is nearly always run for, and it is the one answer that
+ * is nobody else's business by default: asking what you owe should not announce it
+ * to the channel. The server-wide listing it used to give is still there behind
+ * `everyone:true`, and `private:false` posts any of it to the channel.
+ */
+export const privateByDefault = true;
 
 /**
  * How many pairs to list at one line each.
@@ -28,12 +40,25 @@ const MAX_DESCRIPTION = 4096;
  */
 export const MAX_DETAILED_PAIRS = 8;
 
+/**
+ * The flag that asks for the whole server rather than just the caller.
+ *
+ * Named for what it shows rather than as a negation of the default, so it reads the
+ * same whichever the default happens to be.
+ */
+const EVERYONE_OPTION = 'everyone';
+
 export const data = guildOnly(
   new SlashCommandBuilder()
     .setName('balances')
-    .setDescription('Show who owes who')
+    .setDescription('Show what you owe and are owed')
     .addUserOption((o) =>
-      o.setName('user').setDescription('Only show debts involving this person'),
+      o.setName('user').setDescription('Show this person instead of yourself'),
+    )
+    .addBooleanOption((o) =>
+      o
+        .setName(EVERYONE_OPTION)
+        .setDescription('Show every debt in the server, not just one person (default: no)'),
     )
     .addBooleanOption((o) =>
       o
@@ -80,9 +105,15 @@ function breakdownLines(contributions: PairContribution[]): string[] {
  *
  * The same line both listings use, so a pair reads identically whether or not the
  * entries behind it are shown.
+ *
+ * The reader of a private reply appears as `You` rather than as a mention of
+ * themselves, which is both shorter and what makes a column of arrows scannable:
+ * their own name repeating down one side carries no information.
  */
-function pairLine(balance: PairBalance): string {
-  return `<@${balance.debtor}> → <@${balance.creditor}>  **${formatCents(balance.cents)}**`;
+function pairLine(balance: PairBalance, voice: Voice): string {
+  const debtor = capitalise(who(voice, balance.debtor));
+  const creditor = who(voice, balance.creditor);
+  return `${debtor} → ${creditor}  **${formatCents(balance.cents)}**`;
 }
 
 /**
@@ -91,8 +122,12 @@ function pairLine(balance: PairBalance): string {
  * The pair total is restated at the end of the running column rather than only in
  * the headline, so the two can be compared without scrolling back up.
  */
-function detailedBlock(balance: PairBalance, contributions: PairContribution[]): string {
-  const headline = pairLine(balance);
+function detailedBlock(
+  balance: PairBalance,
+  contributions: PairContribution[],
+  voice: Voice,
+): string {
+  const headline = pairLine(balance, voice);
   if (contributions.length === 0) {
     // Not reachable from a ledger this bot wrote - a nonzero balance always has
     // entries behind it - but a hand-edited database should not render a bare
@@ -105,8 +140,17 @@ function detailedBlock(balance: PairBalance, contributions: PairContribution[]):
 /** Who a listing is about, when it is about one person. */
 interface Focus {
   id: string;
-  /** Display name, for headings that read as a sentence about them. */
+  /**
+   * How the prose refers to them: their display name, or `you` when the reply is
+   * private and they are the one reading it.
+   *
+   * A name rather than a mention, unlike the pair lines. This appears in a heading
+   * and in the title, where Discord would render a mention as a pill inside the
+   * underline and the emphasis would sit crookedly around it.
+   */
   name: string;
+  /** Whether `name` is `you`, which the surrounding prose has to agree with. */
+  isReader: boolean;
 }
 
 /** Which side of the focus person a debt sits on: money coming in, or going out. */
@@ -123,8 +167,11 @@ function directionOf(balance: PairBalance, focus: Focus): Direction {
  * those a debt counts as depends on whose listing it is - a heading naming the
  * person cannot be read the wrong way round.
  */
-function groupHeading(direction: Direction, focus: Focus, cents: number): string {
-  const label = direction === 'in' ? `Owed to ${focus.name}` : `${focus.name} owes`;
+function groupHeading(direction: Direction, focus: Focus, voice: Voice, cents: number): string {
+  const label =
+    direction === 'in'
+      ? `Owed to ${focus.name}`
+      : `${capitalise(focus.name)} ${verb(voice, focus.id, 'owes', 'owe')}`;
   return `__${label}__ · **${formatCents(cents)}**`;
 }
 
@@ -156,6 +203,7 @@ function subtotal(balances: PairBalance[]): number {
 function arrange(
   balances: PairBalance[],
   focus: Focus | null,
+  voice: Voice,
   limit: number,
 ): Array<{ balance: PairBalance; heading: string | null }> {
   const kept = balances.slice(0, limit);
@@ -177,7 +225,7 @@ function arrange(
       balance,
       heading:
         i === 0
-          ? groupHeading(direction, focus, subtotal(byDirection(balances, direction)))
+          ? groupHeading(direction, focus, voice, subtotal(byDirection(balances, direction)))
           : null,
     })),
   );
@@ -190,14 +238,14 @@ interface Rendered {
 }
 
 /** One line per pair: the default listing. */
-function renderPlain(balances: PairBalance[], focus: Focus | null): Rendered {
-  const arranged = arrange(balances, focus, MAX_LINES);
+function renderPlain(balances: PairBalance[], focus: Focus | null, voice: Voice): Rendered {
+  const arranged = arrange(balances, focus, voice, MAX_LINES);
   const lines: string[] = [];
   for (const { balance, heading } of arranged) {
     // A blank line before every heading but the first, so the two directions read
     // as separate lists rather than one list with labels in the middle of it.
     if (heading !== null) lines.push(lines.length === 0 ? heading : `\n${heading}`);
-    lines.push(pairLine(balance));
+    lines.push(pairLine(balance, voice));
   }
 
   const omitted = balances.length - arranged.length;
@@ -216,6 +264,7 @@ function renderPlain(balances: PairBalance[], focus: Focus | null): Rendered {
 function renderDetailed(
   balances: PairBalance[],
   focus: Focus | null,
+  voice: Voice,
   guildId: string,
   store: Store,
 ): Rendered {
@@ -223,13 +272,14 @@ function renderDetailed(
   let length = 0;
   let shown = 0;
 
-  for (const { balance, heading } of arrange(balances, focus, MAX_DETAILED_PAIRS)) {
+  for (const { balance, heading } of arrange(balances, focus, voice, MAX_DETAILED_PAIRS)) {
     // The heading joins its pair's block rather than standing as a block of its
     // own, so length-based truncation can never leave a direction labelled with
     // nothing under it.
     const detail = detailedBlock(
       balance,
       store.entriesBetween(guildId, balance.creditor, balance.debtor),
+      voice,
     );
     const block = heading === null ? detail : `${heading}\n${detail}`;
     const added = length === 0 ? block.length : length + 2 + block.length;
@@ -260,6 +310,33 @@ function netTotals(balances: PairBalance[]): Map<string, number> {
   return net;
 }
 
+/**
+ * The one figure a focused listing exists to report.
+ *
+ * "Owed" and "Owes" have no subject in the public wording, which reads as a label on
+ * the person in the title. A private reply is addressed to that person, so it says
+ * so, and the verb has to agree.
+ */
+function netPosition(net: number, focus: Focus): string {
+  if (net === 0) return 'Even overall, though individual debts remain.';
+  const amount = `**${formatCents(Math.abs(net))}** overall.`;
+  if (net > 0) return focus.isReader ? `You are owed ${amount}` : `Owed ${amount}`;
+  return focus.isReader ? `You owe ${amount}` : `Owes ${amount}`;
+}
+
+/**
+ * The title, which is the only place the listing says whose debts these are.
+ *
+ * A private listing about the reader says "Your balances" rather than repeating
+ * their own name back at them; anything else names the person, since a title of
+ * "Balances for you" on a message the channel can read would be addressing nobody.
+ */
+function titleFor(focus: Focus | null): string {
+  if (!focus) return '💰 Outstanding balances';
+  if (focus.isReader) return '💰 Your balances';
+  return `💰 Balances for ${focus.name}`;
+}
+
 export async function execute(
   interaction: ChatInputCommandInteraction,
   store: Store,
@@ -267,22 +344,52 @@ export async function execute(
   const guild = requireGuild(interaction);
 
   const user = interaction.options.getUser('user');
-  const focus: Focus | null = user ? { id: user.id, name: user.displayName } : null;
+  const everyone = interaction.options.getBoolean(EVERYONE_OPTION) ?? false;
   const details = interaction.options.getBoolean('details') ?? false;
+  const voice = voiceOf(interaction, privateByDefault);
+
+  if (everyone && user) {
+    // Both were given and they contradict each other. Refusing beats picking one:
+    // either guess produces a listing that looks like an answer to the other
+    // question, and the figures alone do not say which was honoured.
+    throw new UserError(
+      `\`${EVERYONE_OPTION}:true\` shows the whole server and \`user\` narrows to one ` +
+        'person, so naming both says two different things. Drop whichever you did not mean.',
+    );
+  }
+
+  // The person a bare `/balances` is about: whoever ran it. Naming a `user` is how
+  // to ask about somebody else, and `everyone:true` is how to ask about nobody in
+  // particular.
+  const subject = everyone ? null : (user ?? interaction.user);
+  const isReader = subject !== null && voice.you === subject.id;
+  const focus: Focus | null = subject
+    ? {
+        id: subject.id,
+        // `you` only when the reply is going to that person alone. In the channel,
+        // or when asking about somebody else, their name is the only thing that
+        // identifies them.
+        name: isReader ? 'you' : subject.displayName,
+        isReader,
+      }
+    : null;
+
   const balances = focus
     ? store.balancesFor(guild.id, focus.id)
     : store.allBalances(guild.id);
 
   if (balances.length === 0) {
     await interaction.reply({
-      ...visibility(interaction),
+      ...visibility(interaction, privateByDefault),
       embeds: [
         new EmbedBuilder()
           .setColor(0x4f9d69)
           .setTitle('✅ All settled up')
           .setDescription(
             focus
-              ? `<@${focus.id}> does not owe anyone and is not owed anything.`
+              ? `${capitalise(focus.name)} ${
+                  verb(voice, focus.id, 'does not owe', 'do not owe')
+                } anyone and ${verb(voice, focus.id, 'is', 'are')} not owed anything.`
               : 'Nobody in this server owes anybody.',
           ),
       ],
@@ -291,26 +398,18 @@ export async function execute(
   }
 
   const { description, omitted } = details
-    ? renderDetailed(balances, focus, guild.id, store)
-    : renderPlain(balances, focus);
+    ? renderDetailed(balances, focus, voice, guild.id, store)
+    : renderPlain(balances, focus, voice);
 
   const embed = new EmbedBuilder()
     .setColor(0xd98e04)
-    .setTitle(focus ? `💰 Balances for ${focus.name}` : '💰 Outstanding balances')
+    .setTitle(titleFor(focus))
     .setDescription(description);
 
   if (focus) {
     // A single net figure is the number this person actually cares about.
     const net = netTotals(balances).get(focus.id) ?? 0;
-    embed.addFields({
-      name: 'Net position',
-      value:
-        net > 0
-          ? `Owed **${formatCents(net)}** overall.`
-          : net < 0
-            ? `Owes **${formatCents(-net)}** overall.`
-            : 'Even overall, though individual debts remain.',
-    });
+    embed.addFields({ name: 'Net position', value: netPosition(net, focus) });
     // A focused listing has no footer of its own, so a dropped pair would
     // otherwise vanish without trace.
     if (omitted > 0) {
@@ -328,5 +427,8 @@ export async function execute(
     });
   }
 
-  await interaction.reply({ ...visibility(interaction), embeds: [embed] });
+  await interaction.reply({
+    ...visibility(interaction, privateByDefault),
+    embeds: [embed],
+  });
 }

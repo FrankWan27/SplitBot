@@ -8,7 +8,8 @@ import type { Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { formatCents, parseAmountToCents } from '../money.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import { addressing, capitalise, verb, who } from '../voice.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -37,6 +38,12 @@ export async function execute(
   const to = interaction.options.getUser('to', true);
   const from = interaction.options.getUser('from') ?? interaction.user;
   const amountRaw = interaction.options.getString('amount');
+  const voice = voiceOf(interaction);
+
+  // Both sides of a payment are named throughout the reply, and either can be the
+  // person reading it, so each is resolved once here rather than at every mention.
+  const payer = who(voice, from.id);
+  const payee = who(voice, to.id);
 
   if (from.id === to.id) {
     throw new UserError('A person cannot pay themselves.');
@@ -52,11 +59,19 @@ export async function execute(
   let cents: number;
   if (amountRaw === null) {
     if (owed <= 0) {
+      // This one goes to the caller alone whatever the flag says, since it reports
+      // that nothing happened rather than announcing a payment. So it addresses them
+      // regardless: the reader here is always the person who typed the command.
+      const mine = addressing(interaction.user.id);
+      const [payerToMe, payeeToMe] = [who(mine, from.id), who(mine, to.id)];
+      const owesNothing =
+        `${capitalise(payerToMe)} ${verb(mine, from.id, 'does not owe', 'do not owe')} ` +
+        payeeToMe;
       const message =
         owed === 0
-          ? `<@${from.id}> does not owe <@${to.id}> anything.`
-          : `<@${from.id}> does not owe <@${to.id}> anything - in fact <@${to.id}> ` +
-            `owes <@${from.id}> ${formatCents(-owed)}. ` +
+          ? `${owesNothing} anything.`
+          : `${owesNothing} anything - in fact ${payeeToMe} ` +
+            `${verb(mine, to.id, 'owes', 'owe')} ${payerToMe} ${formatCents(-owed)}. ` +
             `Did you mean \`/settle from:@${to.username} to:@${from.username}\`?`;
       await interaction.reply({ content: message, flags: MessageFlags.Ephemeral });
       return;
@@ -78,7 +93,7 @@ export async function execute(
   const embed = new EmbedBuilder()
     .setColor(0x4f9d69)
     .setTitle('✅ Payment settled')
-    .setDescription(`<@${from.id}> paid <@${to.id}> **${formatCents(cents)}**.`);
+    .setDescription(`${capitalise(payer)} paid ${payee} **${formatCents(cents)}**.`);
 
   // Report the resulting state plainly, including the awkward cases: paying more
   // than was owed flips the debt, and that should be visible rather than hidden.
@@ -87,7 +102,9 @@ export async function execute(
   } else if (afterCents > 0) {
     embed.addFields({
       name: 'Remaining',
-      value: `<@${from.id}> still owes <@${to.id}> ${formatCents(afterCents)}.`,
+      value:
+        `${capitalise(payer)} still ${verb(voice, from.id, 'owes', 'owe')} ${payee} ` +
+        `${formatCents(afterCents)}.`,
     });
   } else {
     embed
@@ -95,8 +112,8 @@ export async function execute(
       .addFields({
         name: 'Heads up - overpaid',
         value:
-          `That was more than was owed. <@${to.id}> now owes <@${from.id}> ` +
-          `${formatCents(-afterCents)}.`,
+          `That was more than was owed. ${capitalise(payee)} now ` +
+          `${verb(voice, to.id, 'owes', 'owe')} ${payer} ${formatCents(-afterCents)}.`,
       });
   }
 

@@ -9,7 +9,8 @@ import { UserError } from '../errors.js';
 import { parseDateToIso } from '../dates.js';
 import { formatCents, parseAmountToCents, splitEvenly } from '../money.js';
 import { parseMentionIds, resolveParticipants } from '../participants.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import { capitalise, verb, who } from '../voice.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -111,9 +112,14 @@ export async function execute(
     occurredAt,
   });
 
+  const voice = voiceOf(interaction);
   const owedLines = splits
     .filter((s) => s.userId !== payer.id)
-    .map((s) => `<@${s.userId}> owes ${formatCents(s.shareCents)}`);
+    .map(
+      (s) =>
+        `${capitalise(who(voice, s.userId))} ${verb(voice, s.userId, 'owes', 'owe')} ` +
+        formatCents(s.shareCents),
+    );
 
   // Shares differing by a penny looks like a rounding bug unless the reply says
   // it was chance. Named explicitly, since the person paying an extra cent is the
@@ -121,7 +127,7 @@ export async function execute(
   const uneven = new Set(shares).size > 1;
   const unlucky = splits
     .filter((s) => s.shareCents > Math.min(...shares))
-    .map((s) => `<@${s.userId}>`);
+    .map((s) => who(voice, s.userId));
   const pennyNote = uneven
     ? ` It does not divide evenly, so the spare ${
         unlucky.length === 1 ? 'penny went' : 'pennies went'
@@ -139,7 +145,7 @@ export async function execute(
     .setColor(0x4f9d69)
     .setTitle(description ? `💳 Bill Logged: ${description}` : '💳 Bill Logged')
     .setDescription(
-      `**${formatCents(totalCents)}** paid by <@${payer.id}>, split ${
+      `**${formatCents(totalCents)}** paid by ${who(voice, payer.id)}, split ${
         participants.length
       } way${participants.length === 1 ? '' : 's'}.${dateNote}${pennyNote}`,
     )

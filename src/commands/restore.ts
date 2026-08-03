@@ -8,7 +8,8 @@ import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { summarise } from './delete.js';
 import { ID_OPTION_NAME, IDS_OPTION_NAME, readEntryIds } from '../entryIds.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import type { Voice } from '../voice.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -28,9 +29,9 @@ export const data = guildOnly(
 );
 
 /** A summary line per entry, labelled with its id once there is more than one. */
-function summariseAll(entries: LedgerEntry[]): string {
-  if (entries.length === 1) return summarise(entries[0]!);
-  return entries.map((e) => `\`#${e.id}\` ${summarise(e)}`).join('\n');
+function summariseAll(entries: LedgerEntry[], voice: Voice): string {
+  if (entries.length === 1) return summarise(entries[0]!, voice);
+  return entries.map((e) => `\`#${e.id}\` ${summarise(e, voice)}`).join('\n');
 }
 
 /**
@@ -71,7 +72,9 @@ export async function execute(
     .setColor(0x4f9d69)
     .setTitle(one ? `♻️ Restored #${entries[0]!.id}` : `♻️ Restored ${entries.length} entries`)
     .setDescription(
-      `${summariseAll(entries)}\n\n${one ? 'Its' : 'Their'} balances are back in effect.`,
+      `${summariseAll(entries, voiceOf(interaction))}\n\n${
+        one ? 'Its' : 'Their'
+      } balances are back in effect.`,
     );
 
   await interaction.reply({ ...visibility(interaction), embeds: [embed] });

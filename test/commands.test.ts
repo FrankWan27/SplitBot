@@ -47,6 +47,19 @@ const EXTRAS = Array.from({ length: 12 }, (_, i) => user(String(500 + i), `extra
 
 const MEMBERS = [ALICE, BOB, CAROL, DAVE, BOTUSER, ...EXTRAS];
 
+/**
+ * `/balances` as it reads in the channel: about one person, in the third person.
+ *
+ * Its own default is the opposite - the caller's own debts, addressed to them - so
+ * a test about the rendering rather than about the default says which it wants.
+ * Spelt out here so the two are not confused: `private:false` is what makes the
+ * reply name people, and it is `everyone` that decides whose debts are listed.
+ */
+const PUBLIC = { private: false } as const;
+
+/** `/balances` covering the whole server, as it did before it defaulted to one person. */
+const SERVER_WIDE = { private: false, everyone: true } as const;
+
 interface FakeButton {
   custom_id: string;
   label?: string;
@@ -191,7 +204,7 @@ test('e2e: bill then balances then settle, full lifecycle', async () => {
   assert.match(billText, /<@300> owes \$10\.00/);
 
   // Balances should show both debts pointing at alice.
-  const balRun = makeInteraction({ caller: BOB });
+  const balRun = makeInteraction({ caller: BOB, booleans: SERVER_WIDE });
   await balances.execute(balRun.interaction, store);
   const balText = replyText(balRun.replies[0]!);
   assert.match(balText, /Outstanding balances/);
@@ -588,7 +601,8 @@ test('e2e: settling with nothing owed says so and writes nothing', async () => {
   const store = new Store(':memory:');
   const run = makeInteraction({ caller: BOB, users: { to: ALICE } });
   await settle.execute(run.interaction, store);
-  assert.match(replyText(run.replies[0]!), /does not owe/);
+  // Bob is both the payer and the only reader, so the reply addresses him.
+  assert.match(replyText(run.replies[0]!), /You do not owe <@100> anything/);
   assert.deepEqual(store.allBalances(GUILD), [], 'no phantom debt created');
   store.close();
 });
@@ -647,7 +661,7 @@ test('e2e: balances for a specific user shows their net position', async () => {
   const b2 = makeInteraction({ caller: BOB, strings: { amount: '8', with: '<@300>' } });
   await bill.execute(b2.interaction, store);
 
-  const run = makeInteraction({ caller: BOB, users: { user: BOB } });
+  const run = makeInteraction({ caller: BOB, users: { user: BOB }, booleans: PUBLIC });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, /Balances for bob/);
@@ -692,7 +706,7 @@ test('e2e: a focused listing splits into money owed to them and money they owe',
     store,
   );
 
-  const run = makeInteraction({ caller: BOB, users: { user: BOB } });
+  const run = makeInteraction({ caller: BOB, users: { user: BOB }, booleans: PUBLIC });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -725,7 +739,7 @@ test('e2e: debts running one way only are listed without headings', async () => 
     );
   }
 
-  const run = makeInteraction({ caller: BOB, users: { user: BOB } });
+  const run = makeInteraction({ caller: BOB, users: { user: BOB }, booleans: PUBLIC });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -747,7 +761,7 @@ test('e2e: the unfocused listing stays flat, having nobody to be relative to', a
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE });
+  const run = makeInteraction({ caller: ALICE, booleans: SERVER_WIDE });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -777,7 +791,11 @@ test('e2e: a grouped listing breaks the same pairs down as an ungrouped one', as
     store,
   );
 
-  const run = makeInteraction({ caller: BOB, users: { user: BOB }, booleans: { details: true } });
+  const run = makeInteraction({
+    caller: BOB,
+    users: { user: BOB },
+    booleans: { ...PUBLIC, details: true },
+  });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -822,7 +840,7 @@ test('e2e: a subtotal counts debts the listing had no room for', async () => {
   const run = makeInteraction({
     caller: ALICE,
     users: { user: ALICE },
-    booleans: { details: true },
+    booleans: { ...PUBLIC, details: true },
   });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
@@ -861,7 +879,7 @@ test('e2e: a direction cut away entirely leaves no heading with nothing under it
   const run = makeInteraction({
     caller: ALICE,
     users: { user: ALICE },
-    booleans: { details: true },
+    booleans: { ...PUBLIC, details: true },
   });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
@@ -914,7 +932,11 @@ test('e2e: details shows the entries behind a balance, running up to its total',
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: BOB },
+    booleans: { ...PUBLIC, details: true },
+  });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -938,7 +960,7 @@ test('e2e: without details the reply is the plain one-line-per-pair listing', as
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE });
+  const run = makeInteraction({ caller: ALICE, booleans: PUBLIC });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, /<@200> → <@100>/, 'the pair line is still there');
@@ -965,7 +987,11 @@ test('e2e: a breakdown covering both directions still lands on the net figure', 
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: BOB },
+    booleans: { ...PUBLIC, details: true },
+  });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -988,7 +1014,7 @@ test('e2e: an uneven split is broken down at the share each person actually owes
   );
 
   const entry = store.recentEntries({ guildId: GUILD, limit: 1 }).entries[0] as BillEntry;
-  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { ...PUBLIC, details: true } });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -1024,7 +1050,11 @@ test('e2e: a bill two people merely shared does not appear in their pair breakdo
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans: { details: true } });
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: BOB },
+    booleans: { ...PUBLIC, details: true },
+  });
   await balances.execute(run.interaction, store);
   const block = pairBlock(replyText(run.replies[0]!), BOB.id, ALICE.id);
 
@@ -1060,7 +1090,7 @@ test('e2e: a deleted bill drops out of the breakdown as well as the balance', as
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { ...PUBLIC, details: true } });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
 
@@ -1092,7 +1122,7 @@ test('e2e: pairs past the detail cap are reported, not silently dropped', async 
     );
   }
 
-  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { ...SERVER_WIDE, details: true } });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   const dropped = debtors.length - MAX_DETAILED_PAIRS;
@@ -1123,7 +1153,11 @@ test('e2e: a focused listing reports dropped pairs too, having no total to hide 
     );
   }
 
-  const run = makeInteraction({ caller: ALICE, users: { user: ALICE }, booleans: { details: true } });
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: ALICE },
+    booleans: { ...PUBLIC, details: true },
+  });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, new RegExp(`${others.length - MAX_DETAILED_PAIRS} more pairs did not fit`));
@@ -1140,7 +1174,7 @@ test('e2e: a listing that fits says nothing about pairs not shown', async () => 
     store,
   );
 
-  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { ...PUBLIC, details: true } });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.doesNotMatch(text, /not broken down|not shown above|did not fit/);
@@ -1149,7 +1183,7 @@ test('e2e: a listing that fits says nothing about pairs not shown', async () => 
 
 test('e2e: details on an empty ledger still just says all settled', async () => {
   const store = new Store(':memory:');
-  const run = makeInteraction({ caller: ALICE, booleans: { details: true } });
+  const run = makeInteraction({ caller: ALICE, booleans: { ...SERVER_WIDE, details: true } });
   await balances.execute(run.interaction, store);
   const text = replyText(run.replies[0]!);
   assert.match(text, /Nobody in this server owes anybody/);
@@ -1159,7 +1193,7 @@ test('e2e: details on an empty ledger still just says all settled', async () => 
 
 test('e2e: an empty ledger reports all settled', async () => {
   const store = new Store(':memory:');
-  const run = makeInteraction({ caller: ALICE });
+  const run = makeInteraction({ caller: ALICE, booleans: SERVER_WIDE });
   await balances.execute(run.interaction, store);
   assert.match(replyText(run.replies[0]!), /Nobody in this server owes anybody/);
   store.close();
@@ -1460,6 +1494,7 @@ test('the flags field round-trips every combination of filters', () => {
           offset: 0,
           showDeleted,
           kinds,
+          addressed: false,
         },
         10,
       );
@@ -1485,6 +1520,7 @@ test('a display name spelt only from the flag letters is not read as flags', () 
       offset: 0,
       showDeleted: false,
       kinds: ['bill'],
+      addressed: false,
     },
     0,
   );
@@ -2245,6 +2281,7 @@ test('a button id stays inside Discord limits even with a long display name', ()
       offset: 0,
       showDeleted: false,
       kinds: ['bill'],
+      addressed: false,
     },
     20,
   );
@@ -2267,6 +2304,7 @@ test('a display name containing a colon does not corrupt the paging state', () =
       offset: 15,
       showDeleted: false,
       kinds: ['bill'],
+      addressed: false,
     },
     15,
   );
@@ -3007,22 +3045,42 @@ test('e2e: private:true keeps every command reply to the caller alone', async ()
   store.close();
 });
 
-test('e2e: replies are public unless private is asked for', async () => {
+/** The commands that answer their caller alone when `private` is not given. */
+const PRIVATE_BY_DEFAULT = new Set(
+  commands.filter((c) => c.privateByDefault).map((c) => c.data.name),
+);
+
+test('e2e: private:false posts every reply to the channel, its own default included', async () => {
   const store = new Store(':memory:');
   const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
 
-  // Omitted and explicitly false have to behave the same, since a shared ledger
-  // being visible is the whole point of the bot.
-  const cases: Record<string, boolean>[] = [{}, { private: false }];
-  for (const booleans of cases) {
-    for (const [name, run] of everyCommand(store, id, booleans)) {
-      const reply = await run();
-      assert.equal(
-        reply.flags,
-        undefined,
-        `/${name} should stay public with ${JSON.stringify(booleans)}`,
-      );
-    }
+  // Asking for the channel has to be honoured by every command, including the ones
+  // that would otherwise have kept the answer to the caller. Otherwise a default
+  // would be a rule rather than a default.
+  for (const [name, run] of everyCommand(store, id, { private: false })) {
+    const reply = await run();
+    assert.equal(reply.flags, undefined, `/${name} should stay public with private:false`);
+  }
+  store.close();
+});
+
+test('e2e: with no flag each command follows its own default', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  // Anything recording a shared fact belongs in the channel; `/balances` answers a
+  // question about one person and is theirs alone unless they say otherwise. Read
+  // from the registry rather than listed here, so a command declaring a default the
+  // registry does not carry cannot pass.
+  assert.ok(PRIVATE_BY_DEFAULT.size > 0, 'at least one command defaults to private');
+
+  for (const [name, run] of everyCommand(store, id, {})) {
+    const reply = await run();
+    assert.equal(
+      reply.flags,
+      PRIVATE_BY_DEFAULT.has(name) ? EPHEMERAL : undefined,
+      `/${name} should follow its own default when private is omitted`,
+    );
   }
   store.close();
 });
@@ -3043,18 +3101,28 @@ test('e2e: a private reply still writes to the ledger like a public one', async 
   store.close();
 });
 
-test('e2e: a private /balances shows the same figures as a public one', async () => {
+test('e2e: a private /balances reports the same money as a public one', async () => {
   const store = new Store(':memory:');
   await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+  await logBill(store, { amount: '6', with: '<@100>', description: 'bagels' }, BOB);
 
-  const open = makeInteraction({ caller: ALICE });
+  const open = makeInteraction({ caller: ALICE, booleans: PUBLIC });
   await balances.execute(open.interaction, store);
   const shut = makeInteraction({ caller: ALICE, booleans: { private: true } });
   await balances.execute(shut.interaction, store);
 
-  // Privacy changes the audience, not the answer. A private listing that quietly
-  // filtered to the caller would read as a bug in the balances themselves.
-  assert.equal(replyText(shut.replies[0]!), replyText(open.replies[0]!));
+  // Privacy changes who is being spoken to, and so the wording, but it must not
+  // change a single figure: a private listing that quietly filtered or re-totalled
+  // would read as a bug in the balances themselves.
+  const amounts = (reply: Reply): string[] => [
+    ...replyText(reply).matchAll(/-?\$[\d,]+\.\d\d/g),
+  ].map((m) => m[0]);
+  assert.deepEqual(amounts(shut.replies[0]!), amounts(open.replies[0]!));
+  assert.ok(amounts(open.replies[0]!).length > 0, 'and there were figures to compare');
+
+  // The wording is the only difference, and it is a real one in both directions.
+  assert.match(replyText(open.replies[0]!), /Balances for alice/);
+  assert.match(replyText(shut.replies[0]!), /Your balances/);
   store.close();
 });
 
@@ -3105,7 +3173,7 @@ test('e2e: a private /settle with nothing owed stays private', async () => {
   await settle.execute(run.interaction, store);
 
   assert.equal(run.replies[0]!.flags, EPHEMERAL);
-  assert.match(replyText(run.replies[0]!), /does not owe/);
+  assert.match(replyText(run.replies[0]!), /You do not owe <@200> anything/);
   store.close();
 });
 
@@ -3137,4 +3205,364 @@ test('every registered command actually declares the private option', () => {
       `/${json.name} has an optional option before a required one`,
     );
   }
+});
+
+/**
+ * `/balances` with nothing typed after it is the command's whole point of contact
+ * for most people, so what it answers and who can see it are pinned here rather
+ * than left to follow from the option defaults.
+ */
+
+test('e2e: a bare /balances answers about the caller, privately', async () => {
+  const store = new Store(':memory:');
+  // Alice owes bob, and carol owes dave. Nothing alice is in should be missing and
+  // nothing she is not in should appear.
+  await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+  await logBill(store, { amount: '10', with: '<@400>', description: 'coffee' }, CAROL);
+
+  const run = makeInteraction({ caller: ALICE });
+  await balances.execute(run.interaction, store);
+  const reply = run.replies[0]!;
+
+  assert.equal(reply.flags, EPHEMERAL, 'what you owe is nobody elses business by default');
+  const text = replyText(reply);
+  assert.match(text, /Your balances/, 'and it is addressed to whoever ran it');
+  assert.match(text, /You → <@200>/, 'the caller appears as "you", not as a mention');
+  assert.doesNotMatch(text, /<@100>/, 'so she is never mentioned in her own listing');
+  assert.doesNotMatch(text, /<@400> → <@300>/, 'and a debt she is not in is not hers to see');
+  assert.match(text, /You owe \*\*\$10\.00\*\* overall/);
+  store.close();
+});
+
+test('e2e: a bare /balances is the same answer as naming yourself', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+
+  // The change was meant to make the bare form a shorthand, not a different
+  // command, so the two have to agree down to the rendered text.
+  const bare = makeInteraction({ caller: ALICE });
+  await balances.execute(bare.interaction, store);
+  const named = makeInteraction({ caller: ALICE, users: { user: ALICE } });
+  await balances.execute(named.interaction, store);
+
+  assert.equal(replyText(named.replies[0]!), replyText(bare.replies[0]!));
+  assert.equal(named.replies[0]!.flags, bare.replies[0]!.flags);
+  store.close();
+});
+
+test('e2e: everyone:true brings back the whole-server listing', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+  await logBill(store, { amount: '10', with: '<@400>', description: 'coffee' }, CAROL);
+
+  const run = makeInteraction({ caller: ALICE, booleans: { everyone: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /Outstanding balances/);
+  assert.match(text, /You → <@200>/, 'a debt the caller is in');
+  assert.match(text, /<@400> → <@300>/, 'and one they are not');
+  assert.match(text, /2 outstanding debts/);
+  // No net position: the listing is about nobody in particular, so there is no
+  // single person for one to be stated about.
+  assert.doesNotMatch(text, /overall/);
+  store.close();
+});
+
+test('e2e: a server-wide listing posted to the channel names everyone', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+
+  // Nobody in a channel is "the reader", so every side of every arrow is a mention -
+  // including the caller's, who is just another name in a list they asked for.
+  const run = makeInteraction({ caller: ALICE, booleans: SERVER_WIDE });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /<@100> → <@200>/, 'the caller is mentioned like anybody else');
+  assert.doesNotMatch(text, /\bYou\b|\byou\b/);
+  store.close();
+});
+
+test('e2e: everyone and user together are refused rather than guessed at', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+
+  // One says "the whole server" and the other "just this person". Either guess
+  // renders a listing that looks like a straight answer to the other question, and
+  // the figures alone do not say which was honoured.
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: BOB },
+    booleans: { everyone: true },
+  });
+  await assert.rejects(
+    () => balances.execute(run.interaction, store),
+    (e: unknown) => e instanceof UserError && /naming both/.test((e as UserError).message),
+  );
+  assert.equal(run.replies.length, 0, 'and nothing was rendered');
+  store.close();
+});
+
+test('e2e: a listing about somebody else is never addressed to them', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' }, ALICE);
+
+  // Bob is the subject and alice the reader, so "you" would be addressing the wrong
+  // person: the prose about the subject has to stay in the third person however the
+  // reply is shown, and it is only the reader who is ever spoken to.
+  const cases: Record<string, boolean>[] = [{}, { private: true }, { ...PUBLIC }];
+  for (const booleans of cases) {
+    const run = makeInteraction({ caller: ALICE, users: { user: BOB }, booleans });
+    await balances.execute(run.interaction, store);
+    const text = replyText(run.replies[0]!);
+    const label = JSON.stringify(booleans);
+
+    assert.match(text, /Balances for bob/, label);
+    assert.doesNotMatch(text, /Your balances/, label);
+    assert.match(text, /<@200> →/, `${label}: bob is named, being the subject`);
+    assert.match(text, /Owes \*\*\$10\.00\*\* overall/, label);
+    assert.doesNotMatch(text, /You owe|You are owed/, label);
+  }
+  store.close();
+});
+
+test('e2e: a reader outside the listing is not addressed at all', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' }, ALICE);
+
+  // Dave is in none of these debts, so there is nothing in the reply for "you" to
+  // refer to and every reference is a mention.
+  const run = makeInteraction({ caller: DAVE, users: { user: BOB }, booleans: { private: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /Balances for bob/);
+  assert.match(text, /<@200> → <@100>/);
+  assert.doesNotMatch(text, /\bYou\b|\byou\b/);
+  store.close();
+});
+
+/**
+ * Saying "you" is what makes a private reply read as an answer rather than as a
+ * note about somebody else. It has to hold across commands and it has to conjugate:
+ * "you owes" would look more broken than the mention it replaced.
+ */
+
+test('e2e: a private reply addresses its reader across every command', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  // The invariant is one-way: a reply that refers to its reader must say "you", but
+  // not every reply refers to them at all. `/edit` here reports what the *others*
+  // owe on a bill alice paid, so she is correctly absent from it. What must never
+  // happen is her being mentioned in the third person to her own face, so that is
+  // what is checked on every command, with `/settle` read by bob since only he has
+  // anything to pay.
+  let addressed = 0;
+  for (const [name, run] of everyCommand(store, id, { private: true })) {
+    const reader = name === 'settle' ? BOB : ALICE;
+    const text = replyText(await run());
+    assert.doesNotMatch(
+      text,
+      new RegExp(`<@${reader.id}>`),
+      `/${name} should not mention its reader to themselves`,
+    );
+    // "you owes" and "you is" are the failure this costs nothing to rule out.
+    assert.doesNotMatch(text, /\b[Yy]ou (owes|is|does|has)\b/, `/${name} conjugates for "you"`);
+    if (/\bYou\b|\byou\b/.test(text)) addressed += 1;
+  }
+
+  // Otherwise a bot that had stopped mentioning anybody at all would pass the above.
+  assert.ok(addressed >= 4, `only ${addressed} replies addressed their reader`);
+  store.close();
+});
+
+test('e2e: a public reply names everyone, the caller included', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  // In a channel every reader is a third party, so "you" would be addressing
+  // whoever happened to look rather than the person meant.
+  for (const [name, run] of everyCommand(store, id, { private: false })) {
+    const text = replyText(await run());
+    assert.doesNotMatch(text, /\bYou\b|\byou\b/, `/${name} should not address the channel as you`);
+  }
+  store.close();
+});
+
+test('e2e: a private /bill says what you owe and what the others do', async () => {
+  const store = new Store(':memory:');
+  // Bob pays and alice reads: one line about her, one about carol, in one field.
+  // Both persons in the same list is where a wrong verb form would show.
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { payer: BOB },
+    strings: { amount: '30', with: '<@100> <@300>', description: 'dinner' },
+    booleans: { private: true },
+  });
+  await bill.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /You owe \$10\.00/);
+  assert.match(text, /<@300> owes \$10\.00/);
+  assert.match(text, /paid by <@200>/, 'the payer is somebody else and is named');
+  store.close();
+});
+
+test('e2e: a private /settle addresses whichever side the reader is on', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '40', with: '<@200>', description: 'dinner' }, ALICE);
+
+  // Bob owes alice $20 and pays $5, so both people appear in both the headline and
+  // the remainder. Bob reads it, so he is "you" on the paying side.
+  const bobs = makeInteraction({
+    caller: BOB,
+    users: { to: ALICE },
+    strings: { amount: '5' },
+    booleans: { private: true },
+  });
+  await settle.execute(bobs.interaction, store);
+  const text = replyText(bobs.replies[0]!);
+  assert.match(text, /You paid <@100> \*\*\$5\.00\*\*/);
+  assert.match(text, /You still owe <@100> \$15\.00/);
+
+  // Alice recording the same payment reads it from the other side: she is the payee,
+  // so bob is the one named and the verb follows him.
+  const alices = makeInteraction({
+    caller: ALICE,
+    users: { to: ALICE, from: BOB },
+    strings: { amount: '5' },
+    booleans: { private: true },
+  });
+  await settle.execute(alices.interaction, store);
+  const other = replyText(alices.replies[0]!);
+  assert.match(other, /<@200> paid you \*\*\$5\.00\*\*/);
+  assert.match(other, /<@200> still owes you \$10\.00/);
+  store.close();
+});
+
+test('e2e: a private /history calls its reader you throughout', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '30', with: '<@100> <@300>', description: 'dinner' }, BOB);
+  await settle.execute(
+    makeInteraction({ caller: ALICE, users: { to: BOB }, strings: { amount: '4' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({
+    caller: ALICE,
+    booleans: { private: true, payments: true },
+  });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /You paid <@200>\./, 'the payment she made');
+  assert.match(text, /You <@300> borrowed \$10\.00\./, 'and the bill she shared');
+  assert.doesNotMatch(text, /<@100>/, 'never as a mention of herself');
+  store.close();
+});
+
+test('e2e: a public /history stays in the third person even when its reader is in it', async () => {
+  const store = new Store(':memory:');
+  await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  const run = makeInteraction({ caller: ALICE, booleans: { private: false } });
+  await history.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /Paid by <@100>/);
+  assert.doesNotMatch(text, /\bYou\b|\byou\b/);
+  store.close();
+});
+
+test('e2e: paging a private history keeps addressing its reader', async () => {
+  const store = new Store(':memory:');
+  for (let i = 0; i < 4; i++) {
+    await logBill(store, { amount: '10', with: '<@100>', description: `entry ${i}` }, BOB);
+  }
+
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { count: 2 },
+    booleans: { private: true },
+  });
+  await history.execute(run.interaction, store);
+  assert.match(replyText(run.replies[0]!), /You borrowed/, 'page one addresses her');
+
+  // A click carries no trace of how the message was posted, so the wording has to
+  // travel in the button id or page two would silently switch to mentions.
+  const older = buttonNamed(run.replies[0]!, 'Older');
+  const click = makeButtonClick(older.custom_id);
+  await history.handleButton(click.interaction, store);
+  const second = replyText(click.updates[0]!);
+  assert.match(second, /entry 1/, 'page two arrives');
+  assert.match(second, /You borrowed/, 'and still addresses her');
+  assert.doesNotMatch(second, /<@100>/);
+  store.close();
+});
+
+test('e2e: paging a public history is never rewritten to address whoever clicked', async () => {
+  const store = new Store(':memory:');
+  for (let i = 0; i < 4; i++) {
+    await logBill(store, { amount: '10', with: '<@100>', description: `entry ${i}` }, BOB);
+  }
+
+  // The buttons under a public listing are clickable by anybody, and the click
+  // edits the message the whole channel is reading. Calling the clicker "you" would
+  // rewrite everyone else's copy to address somebody they are not.
+  const run = makeInteraction({
+    caller: BOB,
+    integers: { count: 2 },
+    booleans: { private: false },
+  });
+  await history.execute(run.interaction, store);
+
+  const older = buttonNamed(run.replies[0]!, 'Older');
+  // makeButtonClick clicks as alice, who is in every one of these bills.
+  const click = makeButtonClick(older.custom_id);
+  await history.handleButton(click.interaction, store);
+  const second = replyText(click.updates[0]!);
+
+  assert.match(second, /entry 1/, 'the page still turns');
+  assert.match(second, /<@100> borrowed/, 'and the clicker is named like anybody else');
+  assert.doesNotMatch(second, /\bYou\b|\byou\b/);
+  store.close();
+});
+
+test('e2e: a private /delete and /restore describe the entry to its reader', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@100>', description: 'dinner' }, BOB);
+
+  // The summary is a phrase rather than a sentence - "paid by x" - so it carries
+  // "you" with no verb to agree with. Shared between both commands, so both are
+  // checked or a change to one could quietly break the other.
+  const gone = makeInteraction({ caller: BOB, integers: { id }, booleans: { private: true } });
+  await del.execute(gone.interaction, store);
+  assert.match(replyText(gone.replies[0]!), /paid by you/);
+
+  const back = makeInteraction({ caller: BOB, integers: { id }, booleans: { private: true } });
+  await restore.execute(back.interaction, store);
+  assert.match(replyText(back.replies[0]!), /paid by you/);
+  store.close();
+});
+
+test('e2e: a private /edit names the reader as you on both sides of a change', async () => {
+  const store = new Store(':memory:');
+  const id = await logBill(store, { amount: '20', with: '<@200>', description: 'dinner' });
+
+  // Moving the payer from alice to bob puts one person on each side of the arrow,
+  // and alice is reading, so she is "you" on the left.
+  const run = makeInteraction({
+    caller: ALICE,
+    integers: { id },
+    users: { payer: BOB },
+    booleans: { private: true },
+  });
+  await edit.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.match(text, /Paid by: you → \*\*<@200>\*\*/);
+  assert.match(text, /You owe \$10\.00/, 'and she is the one who owes now');
+  store.close();
 });

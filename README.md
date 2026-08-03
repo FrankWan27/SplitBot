@@ -5,7 +5,8 @@ Log what someone paid, split it evenly across whoever was there, see who owes wh
 
 Replies are titled by category: 💳 bill, 💰 balances, ✅ payment, 🕓 history, and ✏️ 🗑️ ♻️ for edit, delete, and restore.
 
-Every command takes `private:true`, which shows the reply to you alone instead of posting it to the channel.
+Every command takes `private:true`, which shows the reply to you alone instead of posting it to the channel, and a private reply calls you "you" rather than mentioning you by name.
+`/balances` is private by default, since what you owe is nobody else's business unless you say so.
 See [Private replies](#private-replies).
 
 ## Commands
@@ -47,18 +48,41 @@ Show outstanding debts, largest first.
 
 | Option | Required | Meaning |
 |---|---|---|
-| `user` | no | Only show debts involving this person, split by direction, plus their net position |
+| `user` | no | Show this person instead of yourself, split by direction, plus their net position |
+| `everyone` | no | Every debt in the server rather than one person's; defaults to no |
 | `details` | no | List the bills and payments each balance is made of; defaults to no |
-| `private` | no | Show the reply only to you; defaults to no |
+| `private` | no | Show the reply only to you; **defaults to yes** for this command |
 
 ```
-/balances                    # everyone in the server
+/balances                    # your own debts, shown to you alone
 /balances user:@bob          # only debts involving bob, plus his net position
-/balances details:true       # every balance, with the entries behind it
-/balances user:@bob details:true
+/balances everyone:true      # every debt in the server, as one flat list
+/balances private:false      # post your balances to the channel
+/balances details:true       # your balances, with the entries behind each one
 ```
 
-**Naming a `user` splits their debts by direction**, into what they are owed and what they owe, each with its own subtotal and still largest first within it.
+**On its own, `/balances` answers "what do I owe?"** - your debts, addressed to you, shown to nobody else.
+
+```
+💰 Your balances
+
+__Owed to you__ · **$10.00**
+@carol → you  **$6.00**
+@dave → you  **$4.00**
+
+__You owe__ · **$20.00**
+You → @alice  **$20.00**
+
+Net position
+You owe $10.00 overall.
+```
+
+That is the question the command is nearly always run for, and the one answer that is nobody else's business by default.
+`everyone:true` gives the server-wide listing instead, and `private:false` posts any of it to the channel.
+Naming both `everyone` and `user` is refused rather than guessed at, since the resulting figures would look like a straight answer to whichever question was dropped.
+
+**A listing about one person splits their debts by direction**, into what they are owed and what they owe, each with its own subtotal and still largest first within it.
+Asked about somebody else, or posted to the channel, the same listing names them instead of addressing them:
 
 ```
 💰 Balances for bob
@@ -79,15 +103,15 @@ Each one covers every debt in its direction, including any the listing had no ro
 
 The headings name the person instead of saying "incoming" and "outgoing", because which of those a debt counts as depends on whose listing it is.
 They appear only when debts run both ways: with everything pointing one direction there is nothing to divide, and the total is already stated as the net position.
-The server-wide listing is a single flat list for the same reason - it has no reference person, and every debt there is incoming for one side and outgoing for the other.
+`everyone:true` gives a single flat list for the same reason - it has no reference person, and every debt there is incoming for one side and outgoing for the other.
 
 `details` answers "why do I owe that?".
 Each balance is followed by the entries that make it up, oldest first, with a running total that ends on the figure in the headline - so a disputed balance can be checked line by line instead of taken on trust.
 
 ```
-💰 Balances for bob
+💰 Your balances
 
-@bob → @franky  **$6.00**
+You → @franky  **$6.00**
  `#12` 07/26 dinner at Nopa **+$10.00** → $10.00
  `#14` 07/27 _payment_ **-$5.00** → $5.00
  `#15` 07/28 bagels **+$1.00** → $6.00
@@ -95,7 +119,7 @@ Each balance is followed by the entries that make it up, oldest first, with a ru
 
 Signs are relative to the debt in the headline, so a payment visibly subtracts and a bill running the other way does too.
 The entry ids are the same ones `/edit` and `/delete` take, so a line you disagree with can be fixed on the spot.
-Bob owes here and is owed nothing, so this listing needs no direction headings; add a debt the other way and the same breakdowns appear under one heading each.
+Everything here runs one way, so the listing needs no direction headings; add a debt the other way and the same breakdowns appear under one heading each.
 
 Deleted entries are left out, since they no longer affect the balance and including them would break the running total; `/history show_deleted:true` is where they stay visible.
 A bill you both merely shared - say one you each owed a third person for - does not appear, because it moved nothing between the two of you.
@@ -261,20 +285,37 @@ The bot is for a group of friends who already trust each other with the ledger, 
 Every command takes `private`, which sends the reply to you alone rather than to the channel.
 
 ```
-/balances private:true                       # check what you owe without telling the room
+/balances                                    # already private: this is its default
 /history user:@bob private:true
 /bill amount:60 with:@bob description:dinner private:true
+/balances private:false                      # the other way: post it to the channel
 ```
 
 Discord calls this an ephemeral message: only you can see it, nobody else in the channel is aware it happened, and it disappears when you dismiss it or restart your client.
 
-It changes who sees the reply, not what the reply says or does.
+**Each command has its own default.**
+Anything that records a shared fact - `/bill`, `/settle`, `/edit`, `/delete`, `/restore` - posts to the channel, because the point of logging it is that everyone can see it.
+`/balances` answers a question about one person and defaults to private.
+`/history` is public, being a shared record.
+Whichever way a command leans, `private` overrides it in both directions.
+
+**A private reply calls you "you".**
+There is exactly one person reading it, so mentioning them by name reads as a sentence about somebody else: "@you owe @gant $61.58", shown only to you, is worse than "You owe @gant $61.58".
+A public reply is the opposite case - every reader is a third party, so a mention is the only thing that works.
+So the wording follows from who can see the reply rather than being chosen separately, in `src/voice.ts`.
+
+Only the reader is ever addressed this way.
+`/balances user:@bob`, read by alice, still says "bob owes" and "Owed to bob", because bob is who the listing is *about* and alice is who it is *for*.
+Verbs agree either way, so it is never "you owes".
+
+It changes who sees the reply and how it addresses them, not what the reply reports.
 A private `/bill` still moves the balances and still shows up in everyone's `/history`, because the ledger is shared even when the confirmation is not.
-A private `/balances` shows the same figures a public one would, rather than quietly narrowing to just you - name yourself in `user` for that.
+A private `/balances` reports the same money a public one would, down to the last figure.
 
 `/history` keeps working paging buttons when private, since an ephemeral message can still be edited in place for the person it was sent to.
+A public listing's buttons stay in the third person even for whoever clicks them: the click edits the message the whole channel is reading, so addressing the clicker would rewrite everyone else's copy to speak to somebody they are not.
 
-The option is added to all seven commands from one place in `src/commands/index.ts` rather than declared in each, so its name, description, and default cannot drift apart between commands.
+The option is added to all seven commands from one place in `src/commands/index.ts` rather than declared in each, so its name and meaning cannot drift apart between commands; only the default comes from the command itself.
 Error messages have always been private, and stay that way regardless of the flag - nobody else needs to read them.
 
 ## Setup
@@ -332,7 +373,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 272 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 290 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

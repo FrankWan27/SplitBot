@@ -9,7 +9,8 @@ import { UserError } from '../errors.js';
 import { parseDateToIso } from '../dates.js';
 import { formatCents, parseAmountToCents, splitEvenly } from '../money.js';
 import { parseMentionIds, resolveParticipants } from '../participants.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import { capitalise, verb, who } from '../voice.js';
 
 export const data = guildOnly(
   new SlashCommandBuilder()
@@ -173,6 +174,7 @@ export async function execute(
     throw new UserError(`Entry \`#${id}\` changed while I was editing it. Try again.`);
   }
 
+  const voice = voiceOf(interaction);
   const changes: string[] = [];
   if (totalCents !== before.totalCents) {
     changes.push(`Amount: ${formatCents(before.totalCents)} → **${formatCents(totalCents)}**`);
@@ -183,7 +185,9 @@ export async function execute(
     );
   }
   if (payer.id !== before.payerId) {
-    changes.push(`Paid by: <@${before.payerId}> → **<@${payer.id}>**`);
+    changes.push(
+      `Paid by: ${who(voice, before.payerId)} → **${who(voice, payer.id)}**`,
+    );
   }
   if (!sameIds(newIds, oldIds)) {
     changes.push(`Split between: ${oldIds.length} → **${newIds.length} people**`);
@@ -197,7 +201,11 @@ export async function execute(
 
   const owedLines = splits
     .filter((s) => s.userId !== payer.id)
-    .map((s) => `<@${s.userId}> owes ${formatCents(s.shareCents)}`);
+    .map(
+      (s) =>
+        `${capitalise(who(voice, s.userId))} ${verb(voice, s.userId, 'owes', 'owe')} ` +
+        formatCents(s.shareCents),
+    );
 
   const embed = new EmbedBuilder()
     .setColor(0xd9a13b)

@@ -7,7 +7,8 @@ import type { LedgerEntry, Store } from '../db.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { UserError } from '../errors.js';
 import { formatCents } from '../money.js';
-import { visibility } from '../visibility.js';
+import { visibility, voiceOf } from '../visibility.js';
+import { who, type Voice } from '../voice.js';
 import {
   ID_OPTION_NAME,
   IDS_OPTION_NAME,
@@ -32,13 +33,21 @@ export const data = guildOnly(
     ),
 );
 
-/** One line summarising what an entry was, for a confirmation message. */
-export function summarise(entry: LedgerEntry): string {
+/**
+ * One line summarising what an entry was, for a confirmation message.
+ *
+ * Both forms are phrases rather than sentences - "from x to y", "paid by x" - so
+ * the reader can appear as `you` without any verb having to agree with them.
+ */
+export function summarise(entry: LedgerEntry, voice: Voice): string {
   if (entry.kind === 'payment') {
-    return `**${formatCents(entry.cents)}** from <@${entry.fromId}> to <@${entry.toId}>`;
+    return (
+      `**${formatCents(entry.cents)}** from ${who(voice, entry.fromId)} ` +
+      `to ${who(voice, entry.toId)}`
+    );
   }
   const what = entry.description ?? 'no description';
-  return `**${formatCents(entry.totalCents)} - ${what}**, paid by <@${entry.payerId}>`;
+  return `**${formatCents(entry.totalCents)} - ${what}**, paid by ${who(voice, entry.payerId)}`;
 }
 
 /**
@@ -48,9 +57,9 @@ export function summarise(entry: LedgerEntry): string {
  * `#9` are indistinguishable once they are gone from `/history`. A single delete
  * has its id in the title already, so repeating it here would be noise.
  */
-function summariseAll(entries: LedgerEntry[]): string {
-  if (entries.length === 1) return summarise(entries[0]!);
-  return entries.map((e) => `\`#${e.id}\` ${summarise(e)}`).join('\n');
+function summariseAll(entries: LedgerEntry[], voice: Voice): string {
+  if (entries.length === 1) return summarise(entries[0]!, voice);
+  return entries.map((e) => `\`#${e.id}\` ${summarise(e, voice)}`).join('\n');
 }
 
 /**
@@ -110,7 +119,7 @@ export async function execute(
     .setColor(0xb4453c)
     .setTitle(one ? `🗑️ Deleted #${entries[0]!.id}` : `🗑️ Deleted ${entries.length} entries`)
     .setDescription(
-      `${summariseAll(entries)}\n\nBalances have been adjusted as though ${
+      `${summariseAll(entries, voiceOf(interaction))}\n\nBalances have been adjusted as though ${
         one ? 'it' : 'they'
       } never happened. ${one ? 'It is' : 'They are'} kept in the log, so \`${undo}\` undoes this.`,
     );

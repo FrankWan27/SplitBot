@@ -12,7 +12,8 @@ import { dayHeading, dayKey, displayTimeZone } from '../dates.js';
 import { UserError } from '../errors.js';
 import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
-import { visibility } from '../visibility.js';
+import { isPrivate, visibility } from '../visibility.js';
+import { CHANNEL, addressing, capitalise, who, type Voice } from '../voice.js';
 
 const DEFAULT_COUNT = 5;
 const MAX_COUNT = 25;
@@ -103,7 +104,7 @@ function timestamp(iso: string): string {
  * single figure would state an amount somebody does not actually owe, so each
  * distinct share gets its own line.
  */
-function borrowedLines(entry: BillEntry): string[] {
+function borrowedLines(entry: BillEntry, voice: Voice): string[] {
   const others = entry.splits.filter((s) => s.userId !== entry.payerId && s.shareCents > 0);
   if (others.length === 0) return [];
 
@@ -113,15 +114,19 @@ function borrowedLines(entry: BillEntry): string[] {
   const byShare = new Map<number, string[]>();
   for (const { userId, shareCents } of others) {
     const names = byShare.get(shareCents) ?? [];
-    names.push(`<@${userId}>`);
+    names.push(who(voice, userId));
     byShare.set(shareCents, names);
   }
 
   return [...byShare].map(([shareCents, names]) => {
     const shown = names.slice(0, MAX_NAMES);
     const hidden = names.length - shown.length;
-    const who = `${shown.join(' ')}${hidden > 0 ? ` and ${hidden} more` : ''}`;
-    return `${who} borrowed ${formatCents(shareCents)}.`;
+    // "borrowed" reads the same in both persons, so a line naming the reader needs
+    // no agreement beyond capitalising whichever reference opens it.
+    const subject = [capitalise(shown[0]!), ...shown.slice(1)].join(' ');
+    return `${subject}${hidden > 0 ? ` and ${hidden} more` : ''} borrowed ${formatCents(
+      shareCents,
+    )}.`;
   });
 }
 
@@ -134,15 +139,15 @@ function borrowedLines(entry: BillEntry): string[] {
  * Each clause is capitalised, since the dashes make them separate labels rather
  * than one sentence, and a mixture would read as a mistake.
  */
-function provenance(entry: LedgerEntry, payerId: string): string {
+function provenance(entry: LedgerEntry, payerId: string, voice: Voice): string {
   const parts = [timestamp(entryWhen(entry))];
-  if (entry.createdBy !== payerId) parts.push(`Logged by <@${entry.createdBy}>`);
-  if (entry.editedBy) parts.push(`Edited by <@${entry.editedBy}>`);
-  if (entry.voidedBy) parts.push(`Deleted by <@${entry.voidedBy}>`);
+  if (entry.createdBy !== payerId) parts.push(`Logged by ${who(voice, entry.createdBy)}`);
+  if (entry.editedBy) parts.push(`Edited by ${who(voice, entry.editedBy)}`);
+  if (entry.voidedBy) parts.push(`Deleted by ${who(voice, entry.voidedBy)}`);
   return `_${parts.join(' - ')}_`;
 }
 
-function describe(entry: LedgerEntry): string {
+function describe(entry: LedgerEntry, voice: Voice): string {
   // The id is what `/edit` and `/delete` take, so it has to be visible on every
   // entry. In code formatting: it is a token to be retyped, not prose.
   const tag = `\`#${entry.id}\``;
@@ -155,8 +160,8 @@ function describe(entry: LedgerEntry): string {
   if (entry.kind === 'payment') {
     return [
       headline(formatCents(entry.cents)),
-      `<@${entry.fromId}> paid <@${entry.toId}>.`,
-      provenance(entry, entry.fromId),
+      `${capitalise(who(voice, entry.fromId))} paid ${who(voice, entry.toId)}.`,
+      provenance(entry, entry.fromId, voice),
     ].join('\n');
   }
 
@@ -165,9 +170,9 @@ function describe(entry: LedgerEntry): string {
   const people = entry.splits.length;
   return [
     headline(`${formatCents(entry.totalCents)} - ${entry.description ?? 'no description'}`),
-    `Paid by <@${entry.payerId}> for ${people} ${people === 1 ? 'person' : 'people'}.`,
-    ...borrowedLines(entry),
-    provenance(entry, entry.payerId),
+    `Paid by ${who(voice, entry.payerId)} for ${people} ${people === 1 ? 'person' : 'people'}.`,
+    ...borrowedLines(entry, voice),
+    provenance(entry, entry.payerId, voice),
   ].join('\n');
 }
 
@@ -184,6 +189,20 @@ export interface PageRequest {
   showDeleted: boolean;
   /** Which kinds the listing covers, which paging also has to carry across. */
   kinds: readonly EntryKind[];
+  /**
+   * Whether this listing is addressed to a single reader, and so may call them
+   * `you`.
+   *
+   * True exactly when the reply is private. A public listing sits in the channel
+   * where anybody can click its buttons, and a click rewrites the message everyone
+   * sees, so it can only ever speak in the third person. A private one is visible
+   * and clickable only to the person it was sent to, which makes whoever clicks it
+   * the reader by definition.
+   *
+   * Carried in the button id rather than re-read from the click, since a click
+   * carries no trace of how the message it belongs to was posted.
+   */
+  addressed: boolean;
 }
 
 /**
@@ -194,8 +213,10 @@ export interface PageRequest {
  *     history:<offset>:<limit>:<focusId or ->:<flags>:<focusLabel>
  *
  * `flags` is a set of letters, or `-` for none: `d` for `show_deleted`, `b` for
- * bills and `p` for payments. Paging has to carry every filter, or the second page
- * would quietly cover something the first did not.
+ * bills, `p` for payments, and `y` for a listing that may say `you`. Paging has to
+ * carry every filter, or the second page would quietly cover something the first
+ * did not - and the same goes for the wording, since a click carries no trace of
+ * how the message it belongs to was posted.
  */
 const CUSTOM_ID_PREFIX = 'history';
 
@@ -206,13 +227,14 @@ function encodeFlags(req: PageRequest): string {
   const flags =
     (req.showDeleted ? 'd' : '') +
     (req.kinds.includes('bill') ? 'b' : '') +
-    (req.kinds.includes('payment') ? 'p' : '');
+    (req.kinds.includes('payment') ? 'p' : '') +
+    (req.addressed ? 'y' : '');
   return flags === '' ? '-' : flags;
 }
 
 /** Whether a custom id field is the flags field rather than a label that looks like one. */
 function isFlagsField(field: string | undefined): boolean {
-  return field === '-' || (field !== undefined && field !== '' && /^[dbp]+$/.test(field));
+  return field === '-' || (field !== undefined && field !== '' && /^[dbpy]+$/.test(field));
 }
 
 export function encodePageId(req: PageRequest, offset: number): string {
@@ -257,6 +279,9 @@ export function parsePageId(customId: string): PageRequest | null {
     offset,
     showDeleted: flags.includes('d'),
     kinds,
+    // An id from before this flag existed belongs to a message posted when nothing
+    // said `you`, so the third person is what its pages keep using.
+    addressed: flags.includes('y'),
   };
 }
 
@@ -277,10 +302,22 @@ function titleCase(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
+/**
+ * How the page refers to people, given who is looking at it.
+ *
+ * `reader` is whoever ran the command or clicked the button. That is the same
+ * person in both cases when the listing is private, because Discord shows an
+ * ephemeral message to nobody else, so there is nobody else to click it.
+ */
+function voiceFor(req: PageRequest, reader: string): Voice {
+  return req.addressed ? addressing(reader) : CHANNEL;
+}
+
 /** Builds the embed and buttons for one page. */
 function buildPage(
   req: PageRequest,
   store: Store,
+  voice: Voice,
 ): {
   embeds: EmbedBuilder[];
   components: ActionRowBuilder<ButtonBuilder>[];
@@ -295,7 +332,15 @@ function buildPage(
   });
 
   const noun = kindNoun(req.kinds);
-  const base = req.focusLabel ? `🕓 ${titleCase(noun)} for ${req.focusLabel}` : `🕓 Recent ${noun}`;
+  // "Your bills" rather than the reader's own name read back at them, on the same
+  // grounds as everywhere else - but only when the reply is theirs alone, since a
+  // title of "Your bills" in a channel would be addressing whoever happened to look.
+  const base =
+    req.focusId !== null && voice.you === req.focusId
+      ? `🕓 Your ${noun}`
+      : req.focusLabel
+        ? `🕓 ${titleCase(noun)} for ${req.focusLabel}`
+        : `🕓 Recent ${noun}`;
   // Stated in the title, since a struck-through entry is easy to miss and a
   // listing that includes deleted ones does not add up against `/balances`.
   const title = req.showDeleted ? `${base} (including deleted)` : base;
@@ -329,7 +374,7 @@ function buildPage(
         .setTitle(hiding ? `🕓 No ${noun} to show` : '🕓 Nothing logged yet')
         .setDescription(
           req.focusId
-            ? `No ${noun} involving <@${req.focusId}> yet.${hint}`
+            ? `No ${noun} involving ${who(voice, req.focusId)} yet.${hint}`
             : `No ${noun} have been logged in this server yet.${hint}`,
         );
     }
@@ -352,7 +397,7 @@ function buildPage(
     // rather than as a title belonging to the entry directly beneath it.
     const heading = day !== null && day !== lastDay ? `## __${dayHeading(iso, zone)}__\n` : '';
     if (day !== null) lastDay = day;
-    blocks.push(heading + describe(entry));
+    blocks.push(heading + describe(entry, voice));
   }
 
   // Naming every participant makes an entry far longer than a count did, so 25
@@ -432,21 +477,20 @@ export async function execute(
   const guild = requireGuild(interaction);
   const focus = interaction.options.getUser('user');
 
-  const page = buildPage(
-    {
-      guildId: guild.id,
-      focusId: focus?.id ?? null,
-      focusLabel: focus?.displayName ?? null,
-      limit: interaction.options.getInteger('count') ?? DEFAULT_COUNT,
-      offset: 0,
-      showDeleted: interaction.options.getBoolean('show_deleted') ?? false,
-      kinds: resolveKinds({
-        bills: interaction.options.getBoolean('bills'),
-        payments: interaction.options.getBoolean('payments'),
-      }),
-    },
-    store,
-  );
+  const req: PageRequest = {
+    guildId: guild.id,
+    focusId: focus?.id ?? null,
+    focusLabel: focus?.displayName ?? null,
+    limit: interaction.options.getInteger('count') ?? DEFAULT_COUNT,
+    offset: 0,
+    showDeleted: interaction.options.getBoolean('show_deleted') ?? false,
+    kinds: resolveKinds({
+      bills: interaction.options.getBoolean('bills'),
+      payments: interaction.options.getBoolean('payments'),
+    }),
+    addressed: isPrivate(interaction),
+  };
+  const page = buildPage(req, store, voiceFor(req, interaction.user.id));
 
   // A private listing keeps its buttons: an ephemeral message can be edited in
   // place by whoever it was sent to, so paging works exactly as it does publicly.
@@ -462,7 +506,8 @@ export async function handleButton(
   if (!parsed) return;
 
   const guild = requireGuild(interaction);
-  const page = buildPage({ ...parsed, guildId: guild.id }, store);
+  const req: PageRequest = { ...parsed, guildId: guild.id };
+  const page = buildPage(req, store, voiceFor(req, interaction.user.id));
 
   // Editing rather than replying keeps one message that pages in place, instead
   // of filling the channel with a listing per click.

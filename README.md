@@ -47,7 +47,7 @@ Show outstanding debts, largest first.
 
 | Option | Required | Meaning |
 |---|---|---|
-| `user` | no | Only show debts involving this person, plus their net position |
+| `user` | no | Only show debts involving this person, split by direction, plus their net position |
 | `details` | no | List the bills and payments each balance is made of; defaults to no |
 | `private` | no | Show the reply only to you; defaults to no |
 
@@ -57,6 +57,29 @@ Show outstanding debts, largest first.
 /balances details:true       # every balance, with the entries behind it
 /balances user:@bob details:true
 ```
+
+**Naming a `user` splits their debts by direction**, into what they are owed and what they owe, each with its own subtotal and still largest first within it.
+
+```
+💰 Balances for bob
+
+__Owed to bob__ · **$10.00**
+@carol → @bob  **$6.00**
+@dave → @bob  **$4.00**
+
+__bob owes__ · **$20.00**
+@bob → @alice  **$20.00**
+
+Net position
+Owes $10.00 overall.
+```
+
+The two subtotals differ by exactly the net position below them, which is what makes the net figure checkable rather than something to take on trust.
+Each one covers every debt in its direction, including any the listing had no room for, so a reply that had to drop a pair says so in the footer rather than quietly reporting a smaller subtotal.
+
+The headings name the person instead of saying "incoming" and "outgoing", because which of those a debt counts as depends on whose listing it is.
+They appear only when debts run both ways: with everything pointing one direction there is nothing to divide, and the total is already stated as the net position.
+The server-wide listing is a single flat list for the same reason - it has no reference person, and every debt there is incoming for one side and outgoing for the other.
 
 `details` answers "why do I owe that?".
 Each balance is followed by the entries that make it up, oldest first, with a running total that ends on the figure in the headline - so a disputed balance can be checked line by line instead of taken on trust.
@@ -72,6 +95,7 @@ Each balance is followed by the entries that make it up, oldest first, with a ru
 
 Signs are relative to the debt in the headline, so a payment visibly subtracts and a bill running the other way does too.
 The entry ids are the same ones `/edit` and `/delete` take, so a line you disagree with can be fixed on the spot.
+Bob owes here and is owed nothing, so this listing needs no direction headings; add a debt the other way and the same breakdowns appear under one heading each.
 
 Deleted entries are left out, since they no longer affect the balance and including them would break the running total; `/history show_deleted:true` is where they stay visible.
 A bill you both merely shared - say one you each owed a third person for - does not appear, because it moved nothing between the two of you.
@@ -308,7 +332,7 @@ A payer taking no share is not in the draw at all, so they are always reimbursed
 ## Development
 
 ```bash
-npm test     # 266 tests: money math, date parsing, ledger invariants, and end-to-end command runs
+npm test     # 272 tests: money math, date parsing, ledger invariants, and end-to-end command runs
 npm run lint # typecheck without emitting
 ```
 

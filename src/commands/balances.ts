@@ -8,7 +8,12 @@ import { guildOnly, requireGuild } from '../guild.js';
 import { formatCents } from '../money.js';
 import { visibility } from '../visibility.js';
 
-/** Discord rejects embed descriptions over 4096 characters. */
+/**
+ * How many pairs to list at one line each.
+ *
+ * Well inside Discord's 4096-character description limit, and past the point where
+ * a wall of debts is worth reading top to bottom rather than narrowing with `user`.
+ */
 const MAX_LINES = 40;
 
 /** Discord rejects an embed whose description exceeds this. */
@@ -71,13 +76,23 @@ function breakdownLines(contributions: PairContribution[]): string[] {
 }
 
 /**
+ * One debt, as debtor → creditor.
+ *
+ * The same line both listings use, so a pair reads identically whether or not the
+ * entries behind it are shown.
+ */
+function pairLine(balance: PairBalance): string {
+  return `<@${balance.debtor}> → <@${balance.creditor}>  **${formatCents(balance.cents)}**`;
+}
+
+/**
  * A pair's headline followed by the entries that make it up.
  *
  * The pair total is restated at the end of the running column rather than only in
  * the headline, so the two can be compared without scrolling back up.
  */
 function detailedBlock(balance: PairBalance, contributions: PairContribution[]): string {
-  const headline = `<@${balance.debtor}> → <@${balance.creditor}>  **${formatCents(balance.cents)}**`;
+  const headline = pairLine(balance);
   if (contributions.length === 0) {
     // Not reachable from a ledger this bot wrote - a nonzero balance always has
     // entries behind it - but a hand-edited database should not render a bare
@@ -87,19 +102,105 @@ function detailedBlock(balance: PairBalance, contributions: PairContribution[]):
   return [headline, ...breakdownLines(contributions)].join('\n');
 }
 
+/** Who a listing is about, when it is about one person. */
+interface Focus {
+  id: string;
+  /** Display name, for headings that read as a sentence about them. */
+  name: string;
+}
+
+/** Which side of the focus person a debt sits on: money coming in, or going out. */
+type Direction = 'in' | 'out';
+
+function directionOf(balance: PairBalance, focus: Focus): Direction {
+  return balance.creditor === focus.id ? 'in' : 'out';
+}
+
+/**
+ * The heading for one direction, carrying that direction's subtotal.
+ *
+ * Phrased as who owes whom rather than as "incoming" and "outgoing", since which of
+ * those a debt counts as depends on whose listing it is - a heading naming the
+ * person cannot be read the wrong way round.
+ */
+function groupHeading(direction: Direction, focus: Focus, cents: number): string {
+  const label = direction === 'in' ? `Owed to ${focus.name}` : `${focus.name} owes`;
+  return `__${label}__ · **${formatCents(cents)}**`;
+}
+
+function subtotal(balances: PairBalance[]): number {
+  return balances.reduce((sum, b) => sum + b.cents, 0);
+}
+
+/**
+ * The pairs to render, in the order they are rendered, each carrying the heading
+ * that opens its direction if it is the first of them.
+ *
+ * Which pairs are dropped is decided on the original largest-first order, before
+ * grouping, so grouping changes how the same pairs are arranged rather than which
+ * ones survive. Each direction then holds a run of consecutive pairs, which is what
+ * lets a heading be written once per direction instead of every time the listing
+ * would otherwise alternate between them.
+ *
+ * Headings appear only when the person has debts running both ways. One way only
+ * and the list is already homogeneous, with its total already stated as the net
+ * position underneath, so a heading would label the obvious and repeat a figure.
+ *
+ * Each subtotal is taken over *every* debt in its direction, including any that did
+ * not fit, so the two of them differ by exactly the net position below. A subtotal
+ * of only the visible pairs would be a third figure agreeing with neither the lines
+ * above it nor the net below it, which is the worse of the two ways to be
+ * incomplete: a figure that is short by a stated number of omitted pairs is
+ * checkable, and one that is short by an unstated amount is not.
+ */
+function arrange(
+  balances: PairBalance[],
+  focus: Focus | null,
+  limit: number,
+): Array<{ balance: PairBalance; heading: string | null }> {
+  const kept = balances.slice(0, limit);
+  if (!focus) return kept.map((balance) => ({ balance, heading: null }));
+
+  const byDirection = (list: PairBalance[], d: Direction): PairBalance[] =>
+    list.filter((b) => directionOf(b, focus) === d);
+
+  const directions: Direction[] = ['in', 'out'];
+  // Judged on the whole set rather than on what fits, so a listing does not lose
+  // its headings - and with them the fact that money runs both ways - purely
+  // because the far direction's pairs are the small ones that got cut.
+  if (directions.some((d) => byDirection(balances, d).length === 0)) {
+    return kept.map((balance) => ({ balance, heading: null }));
+  }
+
+  return directions.flatMap((direction) =>
+    byDirection(kept, direction).map((balance, i) => ({
+      balance,
+      heading:
+        i === 0
+          ? groupHeading(direction, focus, subtotal(byDirection(balances, direction)))
+          : null,
+    })),
+  );
+}
+
 /** What a rendered listing came to, and how many pairs it could not fit. */
 interface Rendered {
   description: string;
   omitted: number;
 }
 
-/** One line per pair: the default listing, unchanged. */
-function renderPlain(balances: PairBalance[]): Rendered {
-  const shown = balances.slice(0, MAX_LINES);
-  const lines = shown.map(
-    (b) => `<@${b.debtor}> → <@${b.creditor}>  **${formatCents(b.cents)}**`,
-  );
-  const omitted = balances.length - shown.length;
+/** One line per pair: the default listing. */
+function renderPlain(balances: PairBalance[], focus: Focus | null): Rendered {
+  const arranged = arrange(balances, focus, MAX_LINES);
+  const lines: string[] = [];
+  for (const { balance, heading } of arranged) {
+    // A blank line before every heading but the first, so the two directions read
+    // as separate lists rather than one list with labels in the middle of it.
+    if (heading !== null) lines.push(lines.length === 0 ? heading : `\n${heading}`);
+    lines.push(pairLine(balance));
+  }
+
+  const omitted = balances.length - arranged.length;
   if (omitted > 0) lines.push(`_...and ${omitted} more._`);
   return { description: lines.join('\n'), omitted };
 }
@@ -112,22 +213,33 @@ function renderPlain(balances: PairBalance[]): Rendered {
  * longer sums to its headline and would read as an arithmetic error rather than
  * as a listing that ran out of room.
  */
-function renderDetailed(balances: PairBalance[], guildId: string, store: Store): Rendered {
+function renderDetailed(
+  balances: PairBalance[],
+  focus: Focus | null,
+  guildId: string,
+  store: Store,
+): Rendered {
   const blocks: string[] = [];
   let length = 0;
+  let shown = 0;
 
-  for (const balance of balances.slice(0, MAX_DETAILED_PAIRS)) {
-    const block = detailedBlock(
+  for (const { balance, heading } of arrange(balances, focus, MAX_DETAILED_PAIRS)) {
+    // The heading joins its pair's block rather than standing as a block of its
+    // own, so length-based truncation can never leave a direction labelled with
+    // nothing under it.
+    const detail = detailedBlock(
       balance,
       store.entriesBetween(guildId, balance.creditor, balance.debtor),
     );
+    const block = heading === null ? detail : `${heading}\n${detail}`;
     const added = length === 0 ? block.length : length + 2 + block.length;
     if (added > MAX_DESCRIPTION) break;
     blocks.push(block);
     length = added;
+    shown += 1;
   }
 
-  const omitted = balances.length - blocks.length;
+  const omitted = balances.length - shown;
   if (omitted > 0) {
     // Said in the body as well as the footer: a reader looking for a pair that is
     // not here needs to know it was dropped rather than settled.
@@ -154,7 +266,8 @@ export async function execute(
 ): Promise<void> {
   const guild = requireGuild(interaction);
 
-  const focus = interaction.options.getUser('user');
+  const user = interaction.options.getUser('user');
+  const focus: Focus | null = user ? { id: user.id, name: user.displayName } : null;
   const details = interaction.options.getBoolean('details') ?? false;
   const balances = focus
     ? store.balancesFor(guild.id, focus.id)
@@ -178,12 +291,12 @@ export async function execute(
   }
 
   const { description, omitted } = details
-    ? renderDetailed(balances, guild.id, store)
-    : renderPlain(balances);
+    ? renderDetailed(balances, focus, guild.id, store)
+    : renderPlain(balances, focus);
 
   const embed = new EmbedBuilder()
     .setColor(0xd98e04)
-    .setTitle(focus ? `💰 Balances for ${focus.displayName}` : '💰 Outstanding balances')
+    .setTitle(focus ? `💰 Balances for ${focus.name}` : '💰 Outstanding balances')
     .setDescription(description);
 
   if (focus) {

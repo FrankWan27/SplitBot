@@ -656,6 +656,226 @@ test('e2e: balances for a specific user shows their net position', async () => {
 });
 
 /**
+ * A focused listing splits into money coming in and money going out. These lean on
+ * the two subtotals reconciling with the net position underneath, since a heading
+ * carrying a figure that does not add up is worse than no heading at all.
+ */
+
+/** Reads a dollar figure back to cents, so a rendered total can be checked. */
+function centsIn(text: string): number {
+  const m = /^(-?)\$([\d,]+)\.(\d\d)$/.exec(text);
+  assert.ok(m, `expected a dollar amount, got ${text}`);
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]!.replace(/,/g, '')) * 100 + Number(m[3]!));
+}
+
+/** The subtotal on the heading for one direction of a focused listing. */
+function groupTotal(text: string, heading: string): number {
+  const m = new RegExp(`__${heading}__ · \\*\\*(-?\\$[\\d,]+\\.\\d\\d)\\*\\*`).exec(text);
+  assert.ok(m, `expected a "${heading}" heading in:\n${text}`);
+  return centsIn(m[1]!);
+}
+
+test('e2e: a focused listing splits into money owed to them and money they owe', async () => {
+  const store = new Store(':memory:');
+  // Bob is owed by carol and dave, and owes alice. Both directions, so both
+  // headings, and the pairs must land under the right one.
+  await bill.execute(
+    makeInteraction({ caller: ALICE, strings: { amount: '40', with: '<@200>' } }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({ caller: BOB, strings: { amount: '12', with: '<@300>' } }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({ caller: BOB, strings: { amount: '8', with: '<@400>' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: BOB, users: { user: BOB } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  const owedTo = groupTotal(text, 'Owed to bob');
+  const owes = groupTotal(text, 'bob owes');
+  assert.equal(owedTo, 1000, 'carol owes $6 and dave $4');
+  assert.equal(owes, 2000, 'bob owes alice half of $40');
+
+  // The two subtotals must differ by exactly the net position stated below them, or
+  // one of the three figures is wrong and the reader cannot tell which.
+  assert.match(text, /Owes \*\*\$10\.00\*\* overall/);
+  assert.equal(owes - owedTo, 1000);
+
+  // Each pair under the heading for the direction it actually runs in.
+  const incoming = text.slice(text.indexOf('Owed to bob'), text.indexOf('bob owes'));
+  assert.match(incoming, /<@300> → <@200>/, 'carol owing bob is money coming in');
+  assert.match(incoming, /<@400> → <@200>/, 'so is dave owing bob');
+  assert.doesNotMatch(incoming, /<@200> → <@100>/, 'bob owing alice is not');
+  store.close();
+});
+
+test('e2e: debts running one way only are listed without headings', async () => {
+  const store = new Store(':memory:');
+  // Nothing to categorise: every debt is bob owing, and the net position below
+  // already states the total, so a heading would only repeat it.
+  for (const creditor of [ALICE, CAROL]) {
+    await bill.execute(
+      makeInteraction({ caller: creditor, strings: { amount: '20', with: '<@200>' } }).interaction,
+      store,
+    );
+  }
+
+  const run = makeInteraction({ caller: BOB, users: { user: BOB } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  assert.doesNotMatch(text, /__.*owes__|__Owed to/, 'one direction needs no dividing');
+  assert.match(text, /<@200> → <@100>/, 'the pairs are all still listed');
+  assert.match(text, /<@200> → <@300>/);
+  assert.match(text, /Owes \*\*\$20\.00\*\* overall/);
+  store.close();
+});
+
+test('e2e: the unfocused listing stays flat, having nobody to be relative to', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({ caller: ALICE, strings: { amount: '20', with: '<@200>' } }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({ caller: CAROL, strings: { amount: '10', with: '<@400>' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: ALICE });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // In and out are only meaningful relative to somebody, and a server-wide listing
+  // has no such person - every debt is incoming for one side and outgoing for the
+  // other.
+  assert.doesNotMatch(text, /__.*owes__|__Owed to/);
+  assert.match(text, /<@200> → <@100>/);
+  assert.match(text, /<@400> → <@300>/);
+  store.close();
+});
+
+test('e2e: a grouped listing breaks the same pairs down as an ungrouped one', async () => {
+  const store = new Store(':memory:');
+  await bill.execute(
+    makeInteraction({
+      caller: ALICE,
+      strings: { amount: '40', with: '<@200>', description: 'alices dinner' },
+    }).interaction,
+    store,
+  );
+  await bill.execute(
+    makeInteraction({
+      caller: BOB,
+      strings: { amount: '12', with: '<@300>', description: 'bobs coffee' },
+    }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({ caller: BOB, users: { user: BOB }, booleans: { details: true } });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // Grouping rearranges the listing; it must not drop a breakdown or break the
+  // running total that makes one worth reading.
+  assert.match(pairBlock(text, BOB.id, ALICE.id), /alices dinner \*\*\+\$20\.00\*\*/);
+  assert.match(pairBlock(text, CAROL.id, BOB.id), /bobs coffee \*\*\+\$6\.00\*\*/);
+  assert.deepEqual(runningTotals(text).sort(), ['$20.00', '$6.00']);
+  assert.equal(groupTotal(text, 'Owed to bob'), 600);
+  assert.equal(groupTotal(text, 'bob owes'), 2000);
+  store.close();
+});
+
+test('e2e: a subtotal counts debts the listing had no room for', async () => {
+  const store = new Store(':memory:');
+  // More pairs than `details` will break down, with pairs cut from both directions.
+  // A subtotal over only the visible pairs would agree with neither the lines above
+  // it nor the net below it, leaving three figures and no way to reconcile them.
+  //
+  // Sorted largest first, the listing runs: alice owes $100, nine debts to alice
+  // from $90 down to $10, then alice owes $0.50. So the cap of 8 keeps the big
+  // outgoing pair and seven incoming ones.
+  await bill.execute(
+    makeInteraction({ caller: BOB, strings: { amount: '200', with: '<@100>' } }).interaction,
+    store,
+  );
+  const debtors = EXTRAS.slice(0, 9);
+  for (const [i, debtor] of debtors.entries()) {
+    await bill.execute(
+      makeInteraction({
+        caller: ALICE,
+        strings: { amount: String((debtors.length - i) * 20), with: `<@${debtor.id}>` },
+      }).interaction,
+      store,
+    );
+  }
+  await bill.execute(
+    makeInteraction({ caller: CAROL, strings: { amount: '1', with: '<@100>' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: ALICE },
+    booleans: { details: true },
+  });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  const owedTo = groupTotal(text, 'Owed to alice');
+  const owes = groupTotal(text, 'alice owes');
+  assert.equal(owedTo, 45000, 'all nine debts to alice count, though only seven are shown');
+  assert.equal(owes, 10050, 'including the $0.50 pair that did not fit');
+
+  // The reconciliation the headings promise: the gap between them is the net.
+  assert.match(text, /Owed \*\*\$349\.50\*\* overall/);
+  assert.equal(owedTo - owes, 34950);
+  assert.match(text, /did not fit/, 'and the shortfall in the body is still reported');
+  store.close();
+});
+
+test('e2e: a direction cut away entirely leaves no heading with nothing under it', async () => {
+  const store = new Store(':memory:');
+  // Every pair alice owes is smaller than the ones she is owed, so the cap cuts
+  // that direction away completely.
+  const debtors = EXTRAS.slice(0, MAX_DETAILED_PAIRS + 2);
+  for (const [i, debtor] of debtors.entries()) {
+    await bill.execute(
+      makeInteraction({
+        caller: ALICE,
+        strings: { amount: String((debtors.length - i) * 20), with: `<@${debtor.id}>` },
+      }).interaction,
+      store,
+    );
+  }
+  await bill.execute(
+    makeInteraction({ caller: BOB, strings: { amount: '1', with: '<@100>' } }).interaction,
+    store,
+  );
+
+  const run = makeInteraction({
+    caller: ALICE,
+    users: { user: ALICE },
+    booleans: { details: true },
+  });
+  await balances.execute(run.interaction, store);
+  const text = replyText(run.replies[0]!);
+
+  // A labelled section with no pairs beneath it reads as a rendering fault, so the
+  // heading goes with its pairs. The one that remains still states its own total,
+  // and the footer is what accounts for the difference against the net position.
+  assert.match(text, /__Owed to alice__/, 'the surviving direction is still labelled');
+  assert.doesNotMatch(text, /__alice owes__/, 'the cut one is not labelled over nothing');
+  assert.match(text, /did not fit/);
+  store.close();
+});
+
+/**
  * The breakdown's whole value is that it adds up: a reader settling an argument
  * follows it line by line to the figure /balances reports. So these check the
  * arithmetic of the rendered lines, not just that lines appeared.
